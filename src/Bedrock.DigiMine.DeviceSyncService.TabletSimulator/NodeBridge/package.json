@@ -1,0 +1,17 @@
+{
+  "name": "tablet-simulator-mqtt-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "OpenSSL-based MQTT bridge for Windows Schannel bypass",
+  "main": "mqtt-bridge.js",
+  "scripts": {
+    "validate": "node mqtt-bridge.js --action validate",
+    "postinstall": "node -e \"require('mqtt'); console.log('mqtt dependency OK')\""
+  },
+  "dependencies": {
+    "mqtt": "^5.10.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

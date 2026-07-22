@@ -1,0 +1,164 @@
+body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #f8f9fa; color: #212529; }
+nav { background: #212529; color: #fff; padding: 12px 20px; }
+nav a { color: #fff; margin-right: 16px; text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+h1, h2 { margin-top: 0; }
+table { width: 100%; border-collapse: collapse; background: #fff; }
+th, td { border: 1px solid #dee2e6; padding: 8px; text-align: left; vertical-align: top; }
+th { background: #e9ecef; }
+.btn { padding: 6px 12px; cursor: pointer; border: 1px solid #ced4da; background: #fff; border-radius: 4px; }
+.btn-primary { background: #0d6efd; color: #fff; border-color: #0d6efd; }
+.btn-danger { background: #dc3545; color: #fff; border-color: #dc3545; }
+.form-group { margin-bottom: 12px; }
+label { display: block; font-weight: 600; margin-bottom: 4px; }
+input[type=text], input[type=number], input[type=password], select { padding: 6px; min-width: 320px; max-width: 100%; border: 1px solid #ced4da; border-radius: 4px; }
+input.path-input { width: 100%; min-width: 0; box-sizing: border-box; font-family: Consolas, monospace; font-size: 13px; }
+.card { border: 1px solid #dee2e6; padding: 16px; margin-bottom: 16px; border-radius: 4px; background: #fff; }
+.row { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; margin-bottom: 12px; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; background: #e9ecef; font-size: 12px; }
+.badge-ok { background: #d1e7dd; }
+.badge-err { background: #f8d7da; }
+pre { background: #f1f3f5; padding: 12px; overflow: auto; max-height: 400px; }
+dialog { border: 1px solid #dee2e6; border-radius: 4px; padding: 16px; max-width: 90vw; }
+.muted { color: #6c757d; font-size: 13px; }
+.device-info { display: flex; flex-wrap: wrap; gap: 24px; }
+.info-item { display: flex; flex-direction: column; gap: 4px; }
+.info-label { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; color: #6c757d; }
+.device-toolbar { align-items: center; margin-bottom: 16px; }
+.device-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+.inbound-toolbar { align-items: end; }
+
+input[readonly] { background: #e9ecef; color: #495057; }
+.inbound-toolbar .form-group input[type=text] { min-width: 0; width: 100%; }
+
+.table-scroll {
+  overflow: auto;
+  max-height: 320px;
+  border: 1px solid #dee2e6;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.inbound-table-scroll table {
+  margin: 0;
+}
+
+.inbound-table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #e9ecef;
+  box-shadow: 0 1px 0 #dee2e6;
+}
+
+.inbound-row {
+  cursor: help;
+}
+
+.inbound-row:hover {
+  background: #f8f9fa;
+}
+
+.view-dialog-header h3 {
+  margin: 0 0 8px;
+}
+
+.view-meta {
+  margin: 0 0 6px;
+  word-break: break-all;
+}
+
+.view-dialog-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0;
+}
+
+.view-dialog-actions .btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+#viewDialog,
+#certViewDialog {
+  min-width: min(720px, 90vw);
+}
+
+.cert-files-scroll {
+  margin-top: 12px;
+}
+
+.cert-files-table {
+  margin: 0;
+}
+
+.cert-file-row {
+  cursor: default;
+}
+
+.cert-file-row:not(.cert-file-missing) {
+  cursor: pointer;
+}
+
+.cert-file-row:not(.cert-file-missing):hover {
+  background: #f8f9fa;
+}
+
+.cert-file-missing {
+  opacity: 0.85;
+}
+
+#certViewContent {
+  max-height: 420px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cert-block-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 1rem;
+  margin-bottom: 6px;
+}
+
+.cert-block-header h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.cert-block {
+  background: #f1f3f5;
+  padding: 12px;
+  overflow: auto;
+  max-height: 280px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0;
+}
+
+.cert-block-inline {
+  max-height: none;
+}
+
+.cert-key-options label {
+  font-weight: normal;
+  margin-right: 16px;
+}
+
+textarea#enrollResponse {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  padding: 8px;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+}

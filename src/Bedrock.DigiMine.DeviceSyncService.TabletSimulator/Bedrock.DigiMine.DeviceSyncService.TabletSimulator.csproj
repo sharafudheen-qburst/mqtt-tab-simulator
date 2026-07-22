@@ -1,0 +1,142 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+
+
+  <PropertyGroup>
+
+    <OutputType>Exe</OutputType>
+
+    <RootNamespace>Bedrock.DigiMine.DeviceSyncService.TabletSimulator</RootNamespace>
+
+    <IsPackable>false</IsPackable>
+
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+
+    <CodeAnalysisTreatWarningsAsErrors>false</CodeAnalysisTreatWarningsAsErrors>
+
+    <LibPath>$(MSBuildThisFileDirectory)..\..\lib\</LibPath>
+
+  </PropertyGroup>
+
+
+
+  <ItemGroup>
+
+    <PackageReference Include="BGT.DigiMine.Grpc.Shared" />
+
+    <PackageReference Include="Google.Protobuf" />
+
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+
+    <PackageReference Include="MQTTnet" />
+
+  </ItemGroup>
+
+
+
+  <ItemGroup>
+
+    <Reference Include="Bedrock.DigiMine.DeviceSyncService.Domain">
+
+      <HintPath>$(LibPath)Bedrock.DigiMine.DeviceSyncService.Domain.dll</HintPath>
+
+      <Private>true</Private>
+
+    </Reference>
+
+    <Reference Include="Bedrock.DigiMine.DeviceSyncService.ProtoDecoder">
+
+      <HintPath>$(LibPath)Bedrock.DigiMine.DeviceSyncService.ProtoDecoder.dll</HintPath>
+
+      <Private>true</Private>
+
+    </Reference>
+
+  </ItemGroup>
+
+
+
+  <ItemGroup>
+
+    <None Update="simulator-config.json">
+
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+
+    </None>
+
+    <None Update="appsettings.json">
+
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+
+    </None>
+
+    <None Update="www\**\*">
+
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+
+    </None>
+
+    <None Update="NodeBridge\package.json">
+
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+
+      <TargetPath>NodeBridge\package.json</TargetPath>
+
+    </None>
+
+    <None Update="NodeBridge\mqtt-bridge.js">
+
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+
+      <TargetPath>NodeBridge\mqtt-bridge.js</TargetPath>
+
+    </None>
+
+    <None Update="NodeBridge\README.md">
+
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+
+      <TargetPath>NodeBridge\README.md</TargetPath>
+
+    </None>
+
+  </ItemGroup>
+
+
+
+  <Target Name="EnsureLibDlls" BeforeTargets="ResolveAssemblyReferences">
+
+    <Error Condition="!Exists('$(LibPath)Bedrock.DigiMine.DeviceSyncService.Domain.dll')"
+
+           Text="Missing lib\Bedrock.DigiMine.DeviceSyncService.Domain.dll. Run: powershell -File scripts/sync-libs.ps1" />
+
+    <Error Condition="!Exists('$(LibPath)Bedrock.DigiMine.DeviceSyncService.ProtoDecoder.dll')"
+
+           Text="Missing lib\Bedrock.DigiMine.DeviceSyncService.ProtoDecoder.dll. Run: powershell -File scripts/sync-libs.ps1" />
+
+  </Target>
+
+
+
+  <Target Name="CopyNodeBridgeModules" AfterTargets="Build" Condition="Exists('NodeBridge\node_modules')">
+
+    <ItemGroup>
+
+      <_NodeBridgeModules Include="NodeBridge\node_modules\**\*" />
+
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_NodeBridgeModules)"
+
+          DestinationFiles="@(_NodeBridgeModules->'$(OutputPath)NodeBridge\node_modules\%(RecursiveDir)%(Filename)%(Extension)')"
+
+          SkipUnchangedFiles="true" />
+
+  </Target>
+
+
+
+</Project>
+

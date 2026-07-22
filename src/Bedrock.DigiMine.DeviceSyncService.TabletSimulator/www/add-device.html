@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tablet Simulator — Add device</title>
+<link rel="stylesheet" href="/common.css">
+<style>
+.picker-panel { border: 1px solid #dee2e6; border-radius: 4px; background: #f8f9fa; padding: 10px; margin-top: 8px; }
+.picker-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 220px; overflow: auto; background: #fff; border: 1px solid #dee2e6; border-radius: 4px; }
+.picker-list li { margin: 0; border-bottom: 1px solid #f1f3f5; }
+.picker-list li:last-child { border-bottom: none; }
+.picker-list button {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent;
+  padding: 8px 10px; cursor: pointer; font: inherit;
+}
+.picker-list button:hover { background: #e7f1ff; }
+.picker-list .item-name { font-weight: 600; }
+.picker-list .item-sub { color: #6c757d; font-size: 12px; margin-top: 2px; }
+.picker-list .item-id { color: #495057; font-family: Consolas, monospace; font-size: 12px; word-break: break-all; }
+.selected-box {
+  margin-top: 8px; padding: 8px 10px; background: #e7f1ff; border: 1px solid #b6d4fe;
+  border-radius: 4px; font-size: 13px;
+}
+.selected-box code { word-break: break-all; }
+.token-input { width: 100%; min-width: 0; box-sizing: border-box; font-family: Consolas, monospace; font-size: 12px; min-height: 4.5rem; }
+.card-wide { max-width: 720px; }
+details.manual summary { cursor: pointer; font-weight: 600; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<nav>
+  <strong>Tablet Simulator</strong>
+  <a href="/">Devices</a>
+  <a href="/home.html">Home</a>
+  <a href="/settings.html">Settings</a>
+  <a href="/device-cert.html">Device cert</a>
+</nav>
+<div class="container">
+<h1>Add device</h1>
+<p class="muted">Pick a device (and optionally equipment) from DigiMine Configuration, or enter GUIDs manually. Bearer token is kept in this browser tab only (sessionStorage).</p>
+
+<div class="card card-wide">
+  <div class="form-group">
+    <label for="bearerToken">DigiMine Bearer token</label>
+    <textarea id="bearerToken" class="token-input" placeholder="Paste Bearer token (with or without “Bearer ” prefix)"></textarea>
+    <p class="muted">Not saved to simulator config. Cleared when you close the tab.</p>
+  </div>
+
+  <div class="form-group">
+    <label for="deviceName">Name / details <span class="muted">(optional)</span></label>
+    <input type="text" id="deviceName" placeholder="e.g. Pit A tablet — overrides DigiMine name if set">
+  </div>
+
+  <h2 style="font-size:1.05rem; margin-top:8px;">Device</h2>
+  <div class="row" style="align-items:end;">
+    <div class="form-group" style="flex:1; min-width:200px; margin-bottom:0;">
+      <label for="deviceSearch">Search devices</label>
+      <input type="text" id="deviceSearch" placeholder="Name, serial, type…" style="min-width:0; width:100%;">
+    </div>
+    <button type="button" class="btn btn-primary" id="searchDevices">Search</button>
+  </div>
+  <div id="devicePicker" class="picker-panel" style="display:none;">
+    <span id="devicePickerMeta" class="muted"></span>
+    <ul id="deviceList" class="picker-list"></ul>
+  </div>
+  <div id="deviceSelected" class="selected-box" style="display:none;"></div>
+  <div class="form-group" style="margin-top:12px;">
+    <label for="deviceId">Device ID</label>
+    <input type="text" id="deviceId" class="path-input" placeholder="GUID from picker or paste manually">
+  </div>
+
+  <h2 style="font-size:1.05rem; margin-top:16px;">Equipment <span class="muted">(optional)</span></h2>
+  <p class="muted">If omitted, a new equipment GUID is generated.</p>
+  <div class="row" style="align-items:end;">
+    <div class="form-group" style="flex:1; min-width:200px; margin-bottom:0;">
+      <label for="equipmentSearch">Search equipment</label>
+      <input type="text" id="equipmentSearch" placeholder="Name, type…" style="min-width:0; width:100%;">
+    </div>
+    <button type="button" class="btn btn-primary" id="searchEquipment">Search</button>
+  </div>
+  <div id="equipmentPicker" class="picker-panel" style="display:none;">
+    <span id="equipmentPickerMeta" class="muted"></span>
+    <ul id="equipmentList" class="picker-list"></ul>
+  </div>
+  <div id="equipmentSelected" class="selected-box" style="display:none;"></div>
+  <div class="form-group" style="margin-top:12px;">
+    <label for="equipmentId">Equipment ID</label>
+    <input type="text" id="equipmentId" class="path-input" placeholder="Leave blank to auto-generate">
+  </div>
+
+  <p class="row" style="margin-bottom: 0; margin-top: 16px;">
+    <button type="button" class="btn btn-primary" id="save">Save</button>
+    <a href="/" class="btn">Cancel</a>
+    <span id="saveStatus" class="muted"></span>
+  </p>
+</div>
+</div>
+
+<script>
+const TOKEN_KEY = 'digimine.bearerToken';
+const deviceIdInput = document.getElementById('deviceId');
+const equipmentIdInput = document.getElementById('equipmentId');
+const deviceNameInput = document.getElementById('deviceName');
+const bearerTokenInput = document.getElementById('bearerToken');
+const saveStatus = document.getElementById('saveStatus');
+
+let selectedDevice = null;
+let selectedEquipment = null;
+
+bearerTokenInput.value = sessionStorage.getItem(TOKEN_KEY) || '';
+bearerTokenInput.addEventListener('change', () => {
+  sessionStorage.setItem(TOKEN_KEY, bearerTokenInput.value.trim());
+});
+bearerTokenInput.addEventListener('blur', () => {
+  sessionStorage.setItem(TOKEN_KEY, bearerTokenInput.value.trim());
+});
+
+function getToken() {
+  const token = bearerTokenInput.value.trim();
+  sessionStorage.setItem(TOKEN_KEY, token);
+  return token;
+}
+
+function renderSelected(box, item, kind) {
+  if (!item) {
+    box.style.display = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  box.innerHTML =
+    `<strong>${kind}:</strong> ${escapeHtml(item.name)}` +
+    (item.subtitle ? `<div class="muted">${escapeHtml(item.subtitle)}</div>` : '') +
+    `<div><code>${escapeHtml(item.id)}</code></div>` +
+    `<button type="button" class="btn" style="margin-top:6px;" data-clear="${kind}">Clear</button>`;
+  box.querySelector('[data-clear]')?.addEventListener('click', () => {
+    if (kind === 'Device') {
+      selectedDevice = null;
+      deviceIdInput.value = '';
+      renderSelected(box, null, kind);
+    } else {
+      selectedEquipment = null;
+      equipmentIdInput.value = '';
+      renderSelected(box, null, kind);
+    }
+  });
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function renderList(listEl, items, onPick) {
+  listEl.innerHTML = '';
+  if (!items.length) {
+    const li = document.createElement('li');
+    li.innerHTML = '<button type="button" disabled><span class="item-sub">No results</span></button>';
+    listEl.appendChild(li);
+    return;
+  }
+  for (const item of items) {
+    const li = document.createElement('li');
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.innerHTML =
+      `<div class="item-name">${escapeHtml(item.name)}</div>` +
+      (item.subtitle ? `<div class="item-sub">${escapeHtml(item.subtitle)}</div>` : '') +
+      `<div class="item-id">${escapeHtml(item.id)}</div>`;
+    btn.onclick = () => onPick(item);
+    li.appendChild(btn);
+    listEl.appendChild(li);
+  }
+}
+
+async function queryEntity(entity, searchText, metaEl, listEl, panelEl) {
+  const token = getToken();
+  if (!token) {
+    saveStatus.textContent = 'Paste a DigiMine Bearer token first.';
+    return;
+  }
+
+  metaEl.textContent = 'Searching…';
+  panelEl.style.display = 'block';
+  listEl.innerHTML = '';
+
+  try {
+    const r = await fetch('/api/digimine/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        bearerToken: token,
+        entity,
+        searchText: searchText || '',
+        pageNumber: 1,
+        pageSize: 25,
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      metaEl.textContent = j.error || 'Query failed';
+      return;
+    }
+    metaEl.textContent = `${j.totalCount ?? j.items?.length ?? 0} result(s)`;
+    renderList(listEl, j.items || [], item => {
+      if (entity === 'Device') {
+        selectedDevice = item;
+        deviceIdInput.value = item.id;
+        if (!deviceNameInput.value.trim()) {
+          deviceNameInput.value = item.name || '';
+        }
+        renderSelected(document.getElementById('deviceSelected'), item, 'Device');
+      } else {
+        selectedEquipment = item;
+        equipmentIdInput.value = item.id;
+        renderSelected(document.getElementById('equipmentSelected'), item, 'Equipment');
+      }
+    });
+  } catch (e) {
+    metaEl.textContent = 'Query failed: ' + e.message;
+  }
+}
+
+document.getElementById('searchDevices').onclick = () =>
+  queryEntity(
+    'Device',
+    document.getElementById('deviceSearch').value.trim(),
+    document.getElementById('devicePickerMeta'),
+    document.getElementById('deviceList'),
+    document.getElementById('devicePicker')
+  );
+
+document.getElementById('searchEquipment').onclick = () =>
+  queryEntity(
+    'Equipment',
+    document.getElementById('equipmentSearch').value.trim(),
+    document.getElementById('equipmentPickerMeta'),
+    document.getElementById('equipmentList'),
+    document.getElementById('equipmentPicker')
+  );
+
+document.getElementById('deviceSearch').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('searchDevices').click();
+});
+document.getElementById('equipmentSearch').addEventListener('keydown', e => {
+  if (e.key === 'Enter') document.getElementById('searchEquipment').click();
+});
+
+async function saveDevice() {
+  const deviceId = deviceIdInput.value.trim();
+  const equipmentId = equipmentIdInput.value.trim();
+  const name = deviceNameInput.value.trim();
+  if (!deviceId) {
+    saveStatus.textContent = 'Device ID is required.';
+    return;
+  }
+
+  saveStatus.textContent = 'Saving...';
+  try {
+    const r = await fetch('/api/devices', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        deviceId,
+        name: name || undefined,
+        equipmentId: equipmentId || undefined,
+      }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      saveStatus.textContent = j.error || 'Save failed';
+      return;
+    }
+    window.location.href = '/home.html';
+  } catch (e) {
+    saveStatus.textContent = 'Save failed: ' + e.message;
+  }
+}
+
+document.getElementById('save').onclick = saveDevice;
+</script>
+</body>
+</html>

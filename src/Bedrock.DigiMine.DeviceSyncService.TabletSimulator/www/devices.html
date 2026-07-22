@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tablet Simulator — Devices</title>
+<link rel="stylesheet" href="/common.css">
+</head>
+<body>
+<nav>
+  <strong>Tablet Simulator</strong>
+  <a href="/">Devices</a>
+  <a href="/home.html">Home</a>
+  <a href="/settings.html">Settings</a>
+  <a href="/device-cert.html">Device cert</a>
+</nav>
+<div class="container">
+<h1>Devices</h1>
+<p class="muted">Select a device to open the simulator (Home and Settings). Devices (including name/details) are stored in SQLite (<code>simulator.db</code>) and mirrored in <code>simulator-config.json</code>.</p>
+
+<div class="row device-toolbar">
+  <button type="button" class="btn btn-primary" id="addDevice">Add device</button>
+  <span id="deviceStatus" class="muted"></span>
+</div>
+
+<div class="table-scroll">
+  <table>
+    <thead>
+      <tr><th>Name / details</th><th>Device ID</th><th>Status</th><th>Actions</th></tr>
+    </thead>
+    <tbody id="deviceBody"></tbody>
+  </table>
+</div>
+</div>
+
+<script>
+const deviceBody = document.getElementById('deviceBody');
+const deviceStatus = document.getElementById('deviceStatus');
+
+async function loadDevices() {
+  deviceStatus.textContent = 'Loading...';
+  try {
+    const data = await fetch('/api/devices').then(r => r.json());
+    renderDevices(data.devices || [], data.activeDeviceId || '');
+    deviceStatus.textContent = data.devices?.length
+      ? `${data.devices.length} device(s)`
+      : 'No devices yet — add one to get started.';
+  } catch (e) {
+    deviceStatus.textContent = 'Failed to load devices: ' + e.message;
+    deviceBody.innerHTML = '';
+  }
+}
+
+function renderDevices(devices, activeDeviceId) {
+  deviceBody.innerHTML = '';
+  if (!devices.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 4;
+    td.className = 'muted';
+    td.textContent = 'No devices registered. Click Add device to create one.';
+    tr.appendChild(td);
+    deviceBody.appendChild(tr);
+    return;
+  }
+
+  for (const device of devices) {
+    const tr = document.createElement('tr');
+    const isActive = device.isActive
+      || String(device.deviceId).toLowerCase() === String(activeDeviceId).toLowerCase();
+
+    const tdName = document.createElement('td');
+    const nameText = device.name?.trim() || '';
+    tdName.textContent = nameText || '—';
+    if (!nameText) tdName.className = 'muted';
+    tr.appendChild(tdName);
+
+    const tdId = document.createElement('td');
+    tdId.innerHTML = `<code>${escapeHtml(device.deviceId)}</code>`;
+    tr.appendChild(tdId);
+
+    const tdStatus = document.createElement('td');
+    tdStatus.innerHTML = isActive
+      ? '<span class="badge badge-ok">Active</span>'
+      : '<span class="badge">—</span>';
+    tr.appendChild(tdStatus);
+
+    const tdActions = document.createElement('td');
+    tdActions.className = 'device-actions';
+
+    const editBtn = document.createElement('button');
+    editBtn.type = 'button';
+    editBtn.className = 'btn';
+    editBtn.textContent = 'Edit name';
+    editBtn.onclick = () => editDeviceName(device.deviceId, nameText);
+    tdActions.appendChild(editBtn);
+
+    const openBtn = document.createElement('button');
+    openBtn.type = 'button';
+    openBtn.className = 'btn btn-primary';
+    openBtn.textContent = isActive ? 'Open' : 'Select & open';
+    openBtn.onclick = () => openDevice(device.deviceId);
+    tdActions.appendChild(openBtn);
+
+    tr.appendChild(tdActions);
+    deviceBody.appendChild(tr);
+  }
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function editDeviceName(deviceId, currentName) {
+  const next = window.prompt('Name / details for this device (optional):', currentName || '');
+  if (next === null) {
+    return;
+  }
+
+  deviceStatus.textContent = 'Saving name...';
+  try {
+    const r = await fetch('/api/devices', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, name: next.trim() }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      deviceStatus.textContent = j.error || 'Failed to update name';
+      return;
+    }
+    await loadDevices();
+    deviceStatus.textContent = j.name?.trim()
+      ? `Updated name to "${j.name.trim()}"`
+      : 'Name cleared';
+  } catch (e) {
+    deviceStatus.textContent = 'Failed to update name: ' + e.message;
+  }
+}
+
+async function openDevice(deviceId) {
+  deviceStatus.textContent = 'Opening device...';
+  try {
+    const r = await fetch('/api/devices/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      deviceStatus.textContent = j.error || 'Failed to select device';
+      return;
+    }
+    window.location.href = '/home.html';
+  } catch (e) {
+    deviceStatus.textContent = 'Failed to open device: ' + e.message;
+  }
+}
+
+document.getElementById('addDevice').onclick = () => {
+  window.location.href = '/add-device.html';
+};
+
+loadDevices();
+</script>
+</body>
+</html>

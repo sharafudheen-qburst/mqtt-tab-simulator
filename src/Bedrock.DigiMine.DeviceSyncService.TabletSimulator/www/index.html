@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tablet Simulator</title>
+<link rel="stylesheet" href="/common.css">
+</head>
+<body>
+<nav>
+  <strong>Tablet Simulator</strong>
+  <a href="/">Devices</a>
+  <a href="/home.html">Home</a>
+  <a href="/settings.html">Settings</a>
+  <a href="/device-cert.html">Device cert</a>
+</nav>
+<div class="container">
+<h1>Tablet Simulator</h1>
+
+<div class="card device-info">
+  <div class="info-item" id="deviceNameRow" style="display: none;">
+    <span class="info-label">Name / details</span>
+    <span id="deviceNameLabel">—</span>
+  </div>
+  <div class="info-item">
+    <span class="info-label">Device ID</span>
+    <code id="deviceIdLabel">—</code>
+  </div>
+  <div class="info-item">
+    <span class="info-label">Equipment ID</span>
+    <code id="equipmentIdLabel">—</code>
+  </div>
+</div>
+
+<div class="card row">
+  <div class="form-group">
+    <label for="environment">Environment</label>
+    <select id="environment"></select>
+  </div>
+  <button type="button" class="btn btn-primary" id="connect">Connect</button>
+  <button type="button" class="btn btn-danger" id="disconnect">Disconnect</button>
+  <span id="connStatus" class="badge">disconnected</span>
+</div>
+<p class="muted">Closing the browser does not drop MQTT subscriptions — the simulator process keeps listening. Use Disconnect or stop the app (Ctrl+C) to unsubscribe cleanly.</p>
+
+<p id="status" class="muted">loading...</p>
+<p id="subscriptionStatus" class="muted"></p>
+<details id="connectLogPanel" class="card" style="display:none;">
+  <summary>Connection log</summary>
+  <pre id="connectLog"></pre>
+</details>
+
+<h2>Inbound (service → device)</h2>
+<div class="row inbound-toolbar">
+  <div class="form-group" style="flex:1; min-width:240px; margin-bottom:0;">
+    <label for="inboundSearch">Search</label>
+    <input type="text" id="inboundSearch" placeholder="Filter by topic, event type, equipment, summary, hex, time...">
+  </div>
+  <button type="button" class="btn" id="exportInbound">Export JSON</button>
+  <button type="button" class="btn" id="clear">Clear</button>
+</div>
+<p id="inboundCount" class="muted"></p>
+
+<div class="table-scroll inbound-table-scroll">
+  <table>
+    <thead>
+      <tr><th>Time (IST)</th><th>Topic</th><th>Event type</th><th>Equipment</th><th>Bytes</th><th>Retain</th><th>Actions</th></tr>
+    </thead>
+    <tbody id="inboundBody"></tbody>
+  </table>
+</div>
+
+<dialog id="viewDialog">
+  <div class="view-dialog-header">
+    <h3 id="viewTitle">Decoded log</h3>
+    <p class="view-meta"><strong id="viewTopic"></strong></p>
+    <p class="view-meta muted" id="viewTime"></p>
+    <p class="view-meta muted" id="viewPosition"></p>
+  </div>
+  <pre id="viewContent"></pre>
+  <p class="view-dialog-actions">
+    <button type="button" class="btn" id="viewPrev">Previous</button>
+    <button type="button" class="btn" id="viewNext">Next</button>
+    <button type="button" class="btn" id="viewClose">Close</button>
+  </p>
+</dialog>
+
+<h2>Publish (device → service)</h2>
+<div class="card">
+<p class="form-group"><label>Topic<br><input type="text" id="topic" size="80"></label></p>
+<p class="form-group"><label>Payload (hex or JSON)<br><input type="text" id="payload" size="80" placeholder="hex… or paste protobuf JSON to encode"></label></p>
+<p class="muted">JSON is encoded with ProtoDecoder (<code>MqttProtoEncoder</code>) using the topic above. Hex / file paths use the existing raw path.</p>
+<p><label><input type="checkbox" id="retain"> retain</label></p>
+<p>
+<button type="button" class="btn btn-primary" id="publish">Publish</button>
+<button type="button" class="btn" data-preset="sync">Sync FULL</button>
+<button type="button" class="btn" data-preset="heartbeat">Heartbeat</button>
+</p>
+<p id="publishStatus" class="muted"></p>
+</div>
+</div>
+
+<script>
+const inboundBody = document.getElementById('inboundBody');
+const inboundSearch = document.getElementById('inboundSearch');
+const inboundCount = document.getElementById('inboundCount');
+const environment = document.getElementById('environment');
+const connStatus = document.getElementById('connStatus');
+const status = document.getElementById('status');
+const subscriptionStatus = document.getElementById('subscriptionStatus');
+const topic = document.getElementById('topic');
+const payload = document.getElementById('payload');
+const retain = document.getElementById('retain');
+const publishStatus = document.getElementById('publishStatus');
+const viewDialog = document.getElementById('viewDialog');
+const viewTitle = document.getElementById('viewTitle');
+const viewTopic = document.getElementById('viewTopic');
+const viewTime = document.getElementById('viewTime');
+const viewPosition = document.getElementById('viewPosition');
+const viewContent = document.getElementById('viewContent');
+const viewPrev = document.getElementById('viewPrev');
+const viewNext = document.getElementById('viewNext');
+const messages = [];
+const seenInboundSequences = new Set();
+let msgId = 0;
+let searchQuery = '';
+let viewNav = { entries: [], index: -1, mode: 'log' };
+
+const STORAGE_KEY = 'tabletSimulator.inboundMessages';
+const MAX_STORED_MESSAGES = 500;
+
+const istFormatter = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+function inboundDedupeKey(msg) {
+  const seq = msg.sequence;
+  return seq != null && seq > 0 ? String(seq) : null;
+}
+
+function formatTimeIst(iso) {
+  return istFormatter.format(new Date(iso)).replace(/\//g, '-');
+}
+
+function extractEventType(msg) {
+  if (msg.eventType) return msg.eventType;
+  return extractDecodedJsonProperty(msg, 'eventType');
+}
+
+function extractEquipmentId(msg) {
+  if (msg.equipmentId) return msg.equipmentId;
+  return extractDecodedJsonProperty(msg, 'equipmentId');
+}
+
+function extractDecodedJsonProperty(msg, propertyName) {
+  const summary = msg.decodedSummary || '';
+  const marker = 'Decoded payload:';
+  const jsonStart = summary.indexOf(marker);
+  if (jsonStart < 0) return '';
+  const jsonText = summary.slice(jsonStart + marker.length).trim();
+  try {
+    const parsed = JSON.parse(jsonText);
+    if (parsed?.[propertyName] != null) return String(parsed[propertyName]);
+  } catch {
+    const match = jsonText.match(new RegExp(`"${propertyName}"\\s*:\\s*"([^"]+)"`));
+    if (match) return match[1];
+  }
+  return '';
+}
+
+function messageJson(msg) {
+  return JSON.stringify({
+    sequence: msg.sequence,
+    receivedAt: msg.receivedAt,
+    receivedAtIst: formatTimeIst(msg.receivedAt),
+    topic: msg.topic,
+    eventType: extractEventType(msg) || null,
+    equipmentId: extractEquipmentId(msg) || null,
+    payloadLength: msg.payloadLength,
+    retained: msg.retained,
+    decodedSummary: msg.decodedSummary,
+    payloadHex: msg.payloadHex,
+  }, null, 2);
+}
+
+function matchesSearch(msg, query) {
+  if (!query) return true;
+  const haystack = [
+    msg.receivedAt,
+    formatTimeIst(msg.receivedAt),
+    msg.topic,
+    extractEventType(msg),
+    extractEquipmentId(msg),
+    String(msg.payloadLength),
+    String(msg.retained),
+    msg.decodedSummary || '',
+    msg.payloadHex || ''
+  ].join(' ').toLowerCase();
+  return haystack.includes(query);
+}
+
+function getFilteredEntries() {
+  const query = searchQuery.trim().toLowerCase();
+  const result = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (matchesSearch(messages[i].msg, query)) {
+      result.push(messages[i]);
+    }
+  }
+  return result;
+}
+
+function updateInboundCount(shown, total) {
+  const base = searchQuery
+    ? `Showing ${shown} of ${total} message(s)`
+    : `${total} message(s)`;
+  inboundCount.textContent = total > 0 ? `${base} · saved in browser + SQLite` : base;
+}
+
+function trimMessagesForStorage() {
+  while (messages.length > MAX_STORED_MESSAGES) {
+    const removed = messages.shift();
+    if (removed) {
+      const key = inboundDedupeKey(removed.msg);
+      if (key != null) seenInboundSequences.delete(key);
+    }
+  }
+}
+
+function persistInbound() {
+  try {
+    trimMessagesForStorage();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      nextId: msgId,
+      entries: messages.map(entry => ({ id: entry.id, msg: entry.msg })),
+    }));
+  } catch (err) {
+    console.warn('Failed to save inbound messages to localStorage:', err);
+    if (messages.length > 100) {
+      messages.splice(0, messages.length - 100);
+      seenInboundSequences.clear();
+      for (const entry of messages) {
+        const key = inboundDedupeKey(entry.msg);
+        if (key != null) seenInboundSequences.add(key);
+      }
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          nextId: msgId,
+          entries: messages.map(entry => ({ id: entry.id, msg: entry.msg })),
+        }));
+      } catch (retryErr) {
+        console.warn('Inbound localStorage save retry failed:', retryErr);
+      }
+    }
+  }
+}
+
+function loadInboundFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+
+    const data = JSON.parse(raw);
+    if (!Array.isArray(data.entries)) return;
+
+    messages.length = 0;
+    seenInboundSequences.clear();
+    for (const entry of data.entries) {
+      if (!entry?.msg?.topic) continue;
+      messages.push({ id: entry.id, msg: entry.msg });
+      const key = inboundDedupeKey(entry.msg);
+      if (key != null) seenInboundSequences.add(key);
+    }
+
+    const maxId = messages.reduce((max, entry) => Math.max(max, entry.id), 0);
+    msgId = Math.max(data.nextId || 0, maxId);
+    renderInboundTable();
+  } catch (err) {
+    console.warn('Failed to load inbound messages from localStorage:', err);
+  }
+}
+
+function clearInboundStorage() {
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+function renderInboundTable() {
+  const query = searchQuery.trim().toLowerCase();
+  inboundBody.innerHTML = '';
+  let shown = 0;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const entry = messages[i];
+    if (!matchesSearch(entry.msg, query)) continue;
+    shown++;
+
+    const tr = document.createElement('tr');
+    tr.className = 'inbound-row';
+    tr.title = messageJson(entry.msg);
+
+    const tdTime = document.createElement('td');
+    tdTime.textContent = formatTimeIst(entry.msg.receivedAt);
+    tr.appendChild(tdTime);
+
+    const tdTopic = document.createElement('td');
+    tdTopic.textContent = entry.msg.topic;
+    tr.appendChild(tdTopic);
+
+    const tdEventType = document.createElement('td');
+    const eventType = extractEventType(entry.msg);
+    tdEventType.textContent = eventType || '—';
+    if (eventType) tdEventType.title = eventType;
+    tr.appendChild(tdEventType);
+
+    const tdEquipment = document.createElement('td');
+    const equipmentId = extractEquipmentId(entry.msg);
+    tdEquipment.textContent = equipmentId || '—';
+    if (equipmentId) tdEquipment.title = equipmentId;
+    tr.appendChild(tdEquipment);
+
+    const tdBytes = document.createElement('td');
+    tdBytes.textContent = String(entry.msg.payloadLength);
+    tr.appendChild(tdBytes);
+
+    const tdRetain = document.createElement('td');
+    tdRetain.textContent = String(entry.msg.retained);
+    tr.appendChild(tdRetain);
+
+    const tdActions = document.createElement('td');
+    const logBtn = document.createElement('button');
+    logBtn.type = 'button';
+    logBtn.className = 'btn';
+    logBtn.dataset.action = 'log';
+    logBtn.dataset.id = String(entry.id);
+    logBtn.textContent = 'View log';
+    const hexBtn = document.createElement('button');
+    hexBtn.type = 'button';
+    hexBtn.className = 'btn';
+    hexBtn.dataset.action = 'hex';
+    hexBtn.dataset.id = String(entry.id);
+    hexBtn.textContent = 'View encoded';
+    tdActions.append(logBtn, document.createTextNode(' '), hexBtn);
+    tr.appendChild(tdActions);
+
+    inboundBody.appendChild(tr);
+  }
+  updateInboundCount(shown, messages.length);
+}
+
+function addInboundRow(msg, { skipDedupe = false, skipPersist = false } = {}) {
+  const key = inboundDedupeKey(msg);
+  if (!skipDedupe && key != null && seenInboundSequences.has(key)) return;
+  if (key != null) seenInboundSequences.add(key);
+  messages.push({ id: ++msgId, msg });
+  renderInboundTable();
+  if (!skipPersist) {
+    persistInbound();
+  }
+}
+
+async function renderViewDialog() {
+  const { entries, index, mode } = viewNav;
+  const entry = entries[index];
+  if (!entry) return;
+
+  viewTitle.textContent = mode === 'log' ? 'Decoded log' : 'Encoded payload';
+  viewTopic.textContent = entry.msg.topic;
+  viewTime.textContent = `${formatTimeIst(entry.msg.receivedAt)} IST`;
+  viewPosition.textContent = `${index + 1} of ${entries.length}`;
+  viewPrev.disabled = index <= 0;
+  viewNext.disabled = index >= entries.length - 1;
+
+  if (mode !== 'log') {
+    viewContent.textContent = entry.msg.payloadHex || '(empty)';
+    return;
+  }
+
+  // Re-decode from hex with current ProtoDecoder / Grpc.Shared (stored summary can be stale after lib upgrades).
+  const hex = (entry.msg.payloadHex || '').trim();
+  const topic = entry.msg.topic || '';
+  if (!hex || !topic) {
+    viewContent.textContent = entry.msg.decodedSummary || '(empty)';
+    return;
+  }
+
+  const requestToken = `${entry.id}:${hex}`;
+  viewContent.textContent = 'Re-decoding with current ProtoDecoder…';
+  viewNav.decodeToken = requestToken;
+  try {
+    const r = await fetch('/api/decode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic, payloadHex: hex }),
+    });
+    const j = await r.json();
+    if (viewNav.decodeToken !== requestToken) return;
+    if (!r.ok) {
+      viewContent.textContent =
+        (entry.msg.decodedSummary || '(empty)') +
+        `\n\n(Re-decode failed: ${j.error || r.status})`;
+      return;
+    }
+    viewContent.textContent = j.decodedSummary || entry.msg.decodedSummary || '(empty)';
+    if (j.decodedSummary) {
+      entry.msg.decodedSummary = j.decodedSummary;
+      if (j.eventType) entry.msg.eventType = j.eventType;
+      if (j.equipmentId) entry.msg.equipmentId = j.equipmentId;
+      persistInbound();
+      renderInboundTable();
+    }
+  } catch (e) {
+    if (viewNav.decodeToken !== requestToken) return;
+    viewContent.textContent =
+      (entry.msg.decodedSummary || '(empty)') +
+      `\n\n(Re-decode failed: ${e.message})`;
+  }
+}
+
+function openView(entryId, mode) {
+  const entries = getFilteredEntries();
+  const index = entries.findIndex(e => e.id === entryId);
+  viewNav = { entries, index: index >= 0 ? index : 0, mode };
+  renderViewDialog();
+  viewDialog.showModal();
+}
+
+function stepView(delta) {
+  const nextIndex = viewNav.index + delta;
+  if (nextIndex < 0 || nextIndex >= viewNav.entries.length) return;
+  viewNav.index = nextIndex;
+  renderViewDialog();
+}
+
+inboundBody.onclick = e => {
+  const btn = e.target.closest('button[data-action]');
+  if (!btn) return;
+  openView(Number(btn.dataset.id), btn.dataset.action === 'log' ? 'log' : 'hex');
+};
+
+viewPrev.onclick = () => stepView(-1);
+viewNext.onclick = () => stepView(1);
+document.getElementById('viewClose').onclick = () => viewDialog.close();
+viewDialog.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); stepView(-1); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); stepView(1); }
+});
+document.getElementById('clear').onclick = async () => {
+  messages.length = 0;
+  seenInboundSequences.clear();
+  msgId = 0;
+  clearInboundStorage();
+  renderInboundTable();
+  try {
+    await fetch('/api/inbound', { method: 'DELETE' });
+  } catch (err) {
+    console.warn('Failed to clear server inbound history:', err);
+  }
+};
+inboundSearch.oninput = () => {
+  searchQuery = inboundSearch.value;
+  renderInboundTable();
+};
+document.getElementById('exportInbound').onclick = () => {
+  const query = searchQuery.trim().toLowerCase();
+  const exportList = messages
+    .filter(entry => matchesSearch(entry.msg, query))
+    .map(entry => entry.msg);
+  const blob = new Blob([JSON.stringify(exportList, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `inbound-${new Date().toISOString().replace(/[:.]/g, '-')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+};
+
+async function syncInboundToServer() {
+  const payload = messages
+    .map(entry => entry.msg)
+    .filter(msg => msg?.topic && msg.sequence > 0);
+  if (!payload.length) return;
+
+  try {
+    const r = await fetch('/api/inbound', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: payload }),
+    });
+    if (!r.ok) {
+      console.warn('Inbound sync to server failed:', await r.text());
+      return;
+    }
+    const j = await r.json();
+    if (j.imported > 0) {
+      await loadInboundHistory();
+    }
+  } catch (err) {
+    console.warn('Inbound sync to server failed:', err);
+  }
+}
+
+async function loadInboundHistory() {
+  const r = await fetch('/api/inbound');
+  if (!r.ok) return;
+  const j = await r.json();
+  let added = false;
+  for (const msg of j.messages || []) {
+    const before = messages.length;
+    addInboundRow(msg, { skipPersist: true });
+    if (messages.length > before) added = true;
+  }
+  if (added) {
+    persistInbound();
+  } else {
+    renderInboundTable();
+  }
+}
+
+function updateConnectionUi(s) {
+  const name = (s.name || '').trim();
+  const nameRow = document.getElementById('deviceNameRow');
+  const nameLabel = document.getElementById('deviceNameLabel');
+  if (name) {
+    nameRow.style.display = '';
+    nameLabel.textContent = name;
+  } else {
+    nameRow.style.display = 'none';
+    nameLabel.textContent = '—';
+  }
+  document.getElementById('deviceIdLabel').textContent = s.deviceId || '—';
+  document.getElementById('equipmentIdLabel').textContent = s.equipmentId || '—';
+  topic.value = s.defaultTopic || topic.value;
+  environment.innerHTML = (s.environments || []).map(n =>
+    `<option value="${n}" ${n === s.environment ? 'selected' : ''}>${n}</option>`).join('');
+  connStatus.textContent = s.connected ? 'connected' : 'disconnected';
+  connStatus.className = 'badge ' + (s.connected ? 'badge-ok' : 'badge-err');
+  const bridge = s.usesNodeBridge ? ' | Node OpenSSL bridge' : '';
+  status.textContent = `broker=${s.broker} | env=${s.environment}${bridge}`;
+  if (s.connected && s.subscriptions && s.subscriptions.length) {
+    subscriptionStatus.textContent =
+      `Listening on: ${s.subscriptions.join(', ')} — inbound topics must match to/${s.deviceId}/...`;
+  } else if (s.connected) {
+    subscriptionStatus.textContent = 'Connected but no subscriptions active.';
+  } else {
+    subscriptionStatus.textContent = '';
+  }
+}
+
+async function loadStatus() {
+  const s = await fetch('/api/status').then(r => r.json());
+  updateConnectionUi(s);
+}
+
+document.getElementById('connect').onclick = async () => {
+  connStatus.textContent = 'connecting...';
+  connStatus.className = 'badge';
+  const connectLogPanel = document.getElementById('connectLogPanel');
+  const connectLog = document.getElementById('connectLog');
+  connectLogPanel.style.display = 'block';
+  connectLog.textContent = 'Connecting...';
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const r = await fetch('/api/connect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ environmentName: environment.value, saveActive: true }),
+      signal: controller.signal
+    });
+    const j = await r.json();
+    connectLog.textContent = (j.log && j.log.length) ? j.log.join('\n') : (j.error || 'done');
+    if (!r.ok) {
+      connStatus.textContent = j.error || 'failed';
+      connStatus.className = 'badge badge-err';
+      return;
+    }
+    connStatus.textContent = 'connected';
+    connStatus.className = 'badge badge-ok';
+    await loadStatus();
+  } catch (e) {
+    connectLog.textContent = e.name === 'AbortError'
+      ? 'Request timed out after 30 seconds. Check broker host/port and certificates in Settings.'
+      : String(e);
+    connStatus.textContent = 'failed';
+    connStatus.className = 'badge badge-err';
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+document.getElementById('disconnect').onclick = async () => {
+  connStatus.textContent = 'disconnecting...';
+  connStatus.className = 'badge';
+  try {
+    const r = await fetch('/api/disconnect', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) {
+      connStatus.textContent = j.error || 'failed';
+      connStatus.className = 'badge badge-err';
+      return;
+    }
+    connStatus.textContent = 'disconnected';
+    connStatus.className = 'badge badge-err';
+    await loadStatus();
+  } catch (e) {
+    connStatus.textContent = 'failed';
+    connStatus.className = 'badge badge-err';
+    status.textContent = String(e);
+  }
+};
+
+loadStatus().catch(e => status.textContent = 'status error: ' + e);
+fetch('/api/devices').then(r => r.json()).then(data => {
+  if (!data.devices?.length) window.location.href = '/';
+}).catch(() => {});
+loadInboundFromStorage();
+loadInboundHistory()
+  .then(() => syncInboundToServer())
+  .catch(e => status.textContent = 'inbound load error: ' + e);
+const es = new EventSource('/api/events');
+es.onmessage = e => {
+  try {
+    addInboundRow(JSON.parse(e.data));
+  } catch (err) {
+    console.error('Inbound SSE parse error:', err, e.data);
+  }
+};
+es.onerror = () => {
+  if (!connStatus.textContent.includes('sse lost')) {
+    connStatus.textContent += ' (sse lost)';
+  }
+};
+
+document.getElementById('publish').onclick = async () => {
+  publishStatus.textContent = 'publishing...';
+  const r = await fetch('/api/publish', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ topic: topic.value.trim(), payload: payload.value.trim(), retain: retain.checked })
+  });
+  const j = await r.json();
+  publishStatus.textContent = r.ok ? 'published' : (j.error || 'failed');
+};
+
+document.querySelectorAll('[data-preset]').forEach(btn => {
+  btn.onclick = async () => {
+    publishStatus.textContent = 'publishing...';
+    const r = await fetch('/api/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topic.value.trim(), preset: btn.dataset.preset })
+    });
+    const j = await r.json();
+    publishStatus.textContent = r.ok ? 'published' : (j.error || 'failed');
+  };
+});
+</script>
+</body>
+</html>

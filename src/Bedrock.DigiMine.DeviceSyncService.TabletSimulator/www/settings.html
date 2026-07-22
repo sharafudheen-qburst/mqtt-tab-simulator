@@ -1,0 +1,700 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tablet Simulator — Settings</title>
+<link rel="stylesheet" href="/common.css">
+</head>
+<body>
+<nav>
+  <strong>Tablet Simulator</strong>
+  <a href="/">Devices</a>
+  <a href="/home.html">Home</a>
+  <a href="/settings.html">Settings</a>
+  <a href="/device-cert.html">Device cert</a>
+</nav>
+<div class="container">
+<h1>Environment Settings</h1>
+<p class="muted">Point to a folder on disk that contains <code>ca.crt</code>, <code>client.crt</code>, and <code>client.key</code> (same layout as MQTTX).</p>
+
+<div class="card row">
+  <div class="form-group">
+    <label for="envSelect">Environment</label>
+    <select id="envSelect"></select>
+  </div>
+  <button type="button" class="btn" id="addEnv">Add</button>
+  <button type="button" class="btn btn-danger" id="deleteEnv">Delete</button>
+</div>
+
+<div class="card">
+<h2>Device</h2>
+<p class="muted">Device ID is managed on the <a href="/">Devices</a> page. Equipment ID applies to the active device.</p>
+<div class="form-group"><label>Name / details <span class="muted">(optional)</span><input type="text" id="deviceName" placeholder="e.g. Pit A tablet, Loader #3"></label></div>
+<div class="form-group"><label>Device ID<input type="text" id="deviceId" readonly></label></div>
+<div class="form-group"><label>Equipment ID<input type="text" id="equipmentId"></label></div>
+</div>
+
+<div class="card">
+<h2>MQTT — <span id="envName"></span></h2>
+<div class="form-group"><label>Name<input type="text" id="name"></label></div>
+<div class="form-group">
+  <label>Broker <span class="muted">(like MQTTX)</span></label>
+  <div class="row" style="align-items: center; gap: 8px; flex-wrap: wrap;">
+    <select id="mqttScheme" style="width: auto; min-width: 7rem;">
+      <option value="mqtt">mqtt://</option>
+      <option value="mqtts">mqtts://</option>
+    </select>
+    <input type="text" id="host" placeholder="10.10.127.155" style="flex: 1; min-width: 12rem;">
+    <label class="muted" style="margin: 0;">:</label>
+    <input type="number" id="port" style="width: 6rem;" placeholder="31884">
+  </div>
+  <p class="muted" id="brokerPreview" style="margin-top: 6px;"></p>
+</div>
+<div class="form-group"><label>Client ID<input type="text" id="clientId"></label></div>
+<div class="form-group"><label>Username<input type="text" id="username"></label></div>
+<div class="form-group"><label>Password<input type="password" id="password"></label></div>
+<div class="form-group"><label>Keep alive (s)<input type="number" id="keepAliveSeconds"></label></div>
+<div class="form-group"><label><input type="checkbox" id="cleanSession"> Clean session</label></div>
+<div class="form-group"><label><input type="checkbox" id="sslTls"> SSL/TLS</label></div>
+<div class="form-group"><label><input type="checkbox" id="sslSecure"> SSL secure (strict validation)</label></div>
+<div class="form-group"><label><input type="checkbox" id="useNodeMqttBridge" checked> Use Node.js MQTT bridge (OpenSSL) <span class="muted">— recommended on Windows for mqtts</span></label></div>
+<div class="form-group"><label>ALPN<input type="text" id="alpn"></label></div>
+<div class="form-group">
+  <label>Certificate type</label>
+  <select id="certificateType">
+    <option value="CA">CA signed certificates</option>
+    <option value="Self signed certificates">Self signed certificates</option>
+  </select>
+</div>
+</div>
+
+<div class="card">
+<h2>Certificates</h2>
+<p class="muted">Certificate folder is <strong>per device</strong> (active device: <code id="certDeviceIdLabel">—</code>). Each device uses its own <code>ca.crt</code> / <code>client.crt</code> / <code>client.key</code>.</p>
+<div class="form-group">
+  <label>Certificate folder <span id="certFolderStatus" class="badge"></span></label>
+  <input type="text" id="certificateFolder" class="path-input" placeholder="C:\path\to\device-certs\{deviceId}">
+  <p class="muted">Saved on the active device. Switching devices loads that device’s folder for MQTT TLS.</p>
+  <p class="muted" id="certFolderPreview"></p>
+</div>
+
+<div class="table-scroll cert-files-scroll">
+  <table class="cert-files-table">
+    <thead>
+      <tr><th>File</th><th>Description</th><th>Status</th><th>Size</th><th>Actions</th></tr>
+    </thead>
+    <tbody id="certFilesBody">
+      <tr><td colspan="5" class="muted">Enter a certificate folder to list files.</td></tr>
+    </tbody>
+  </table>
+</div>
+</div>
+
+<dialog id="certViewDialog">
+  <div class="view-dialog-header">
+    <h3 id="certViewTitle">Certificate file</h3>
+    <p class="view-meta"><strong id="certViewFile"></strong></p>
+    <p class="view-meta muted" id="certViewPath"></p>
+  </div>
+  <pre id="certViewContent"></pre>
+  <p class="view-dialog-actions">
+    <button type="button" class="btn btn-primary" id="certCopy">Copy</button>
+    <button type="button" class="btn" id="certViewClose">Close</button>
+    <span id="certCopyStatus" class="muted"></span>
+  </p>
+</dialog>
+
+<div class="card">
+<h2>Device enrollment (CSR)</h2>
+<div class="form-group">
+  <label for="dssEnrollBaseUrl">DSS enroll API base URL</label>
+  <input type="text" id="dssEnrollBaseUrl" class="path-input" placeholder="https://localhost:5004/api/v1">
+  <p class="muted">Used on the <a href="/device-cert.html">Device cert</a> page for Postman enroll URL. Full path: <code>{base}/devices/{deviceId}/enroll</code></p>
+</div>
+<div class="form-group">
+  <label for="deviceCertOutputFolder">Device cert output folder</label>
+  <input type="text" id="deviceCertOutputFolder" class="path-input" placeholder="C:\path\to\device-certs">
+  <p class="muted">Saved in <code>simulator-config.json</code>. Bundles are saved under <code>{folder}\{deviceId}\</code> (numeric suffix if the folder already exists).</p>
+</div>
+</div>
+
+<div class="card">
+<h2>DigiMine Configuration API</h2>
+<p class="muted">Used by <a href="/add-device.html">Add device</a> to search devices/equipment. Bearer token is pasted on that page only (not stored here).</p>
+<div class="form-group">
+  <label for="digimineBaseUrl">Configuration base URL</label>
+  <input type="text" id="digimineBaseUrl" class="path-input" placeholder="https://digimineconfigurationdev1.irh.ae">
+</div>
+<div class="form-group">
+  <label for="digimineOuId">Operational unit ID</label>
+  <input type="text" id="digimineOuId" class="path-input" placeholder="dcf5b0e5-5489-4020-81b3-6377e1d66034">
+  <p class="muted">Sent as <code>x-operational-unit-id</code>.</p>
+</div>
+<div class="form-group">
+  <label for="digimineDeviceTarget">Device query target</label>
+  <input type="text" id="digimineDeviceTarget" class="path-input" placeholder="/configurations?type=object&amp;source=device&amp;categoryId=bgt.mining.devices">
+</div>
+<div class="form-group">
+  <label for="digimineEquipmentTarget">Equipment query target</label>
+  <input type="text" id="digimineEquipmentTarget" class="path-input" placeholder="/configurations?type=object&amp;source=equipment&amp;categoryId=bgt.mining.equipments">
+</div>
+</div>
+
+<div class="card">
+<h2>DSS / ProtoDecoder libs</h2>
+<p class="muted">Build and copy Domain + ProtoDecoder DLLs into <code>lib/</code>, and align <code>BGT.DigiMine.Grpc.Shared</code> in <code>Directory.Packages.props</code> with the ProtoDecoder build. Rebuild and restart after import.</p>
+<div class="form-group">
+  <label for="dssRepoRoot">DSS repo root</label>
+  <input type="text" id="dssRepoRoot" class="path-input" placeholder="C:\Work\IRH_Solutions\bedrock.digimine.devicesyncservice">
+  <p class="muted">Must contain <code>tools\Bedrock.DigiMine.DeviceSyncService.ProtoDecoder</code> and Domain projects.</p>
+</div>
+<div class="form-group">
+  <label><input type="checkbox" id="syncOnStartup" checked> Sync libs on startup <span class="muted">— runs <code>scripts/sync-libs.ps1</code> when the app starts (use <code>--skip-lib-sync</code> to bypass)</span></label>
+</div>
+<p>
+  <span id="libsStatusBadge" class="badge">idle</span>
+  <span id="libsStatusSummary" class="muted"></span>
+</p>
+<pre id="libsStatusDetail" style="max-height:10rem; overflow:auto;">Loading lib status…</pre>
+<p>
+  <button type="button" class="btn btn-primary" id="importLibs">Import decoder + gRPC version</button>
+  <span id="importLibsStatus" class="muted"></span>
+</p>
+<pre id="importLibsLog" style="display:none; max-height:14rem; overflow:auto;"></pre>
+</div>
+
+<div class="card">
+<h2>Connection test</h2>
+<p class="muted">Tests MQTT using the settings below (saved or unsaved). Does not switch the active session on the home page.</p>
+<p>
+  <button type="button" class="btn btn-primary" id="validate">Validate connection</button>
+  <span id="validateStatus" class="badge">idle</span>
+</p>
+<pre id="connectionLog">No validation run yet.</pre>
+</div>
+
+<p>
+<button type="button" class="btn btn-primary" id="save">Save all settings</button>
+<span id="saveStatus" class="muted"></span>
+</p>
+</div>
+
+<script>
+let config = null;
+
+const CERT_FILES = ['ca.crt', 'client.crt', 'client.key'];
+
+function currentEnv() {
+  return config.environments.find(e => e.name === document.getElementById('envSelect').value);
+}
+
+function setPathStatus(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = 'badge' + (text === '' ? '' : ok ? ' badge-ok' : ' badge-err');
+}
+
+function updateCertFolderPreview() {
+  const folder = document.getElementById('certificateFolder').value.trim();
+  const preview = document.getElementById('certFolderPreview');
+  if (!folder) {
+    preview.textContent = '';
+    setPathStatus('certFolderStatus', '', true);
+    renderCertFiles([]);
+    return;
+  }
+  const sep = folder.includes('\\') ? '\\' : '/';
+  preview.textContent = CERT_FILES.map(f => folder.replace(/[\\/]+$/, '') + sep + f).join(' · ');
+  loadCertFiles();
+}
+
+function formatFileSize(bytes) {
+  if (!bytes) return '—';
+  if (bytes < 1024) return `${bytes} B`;
+  return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function renderCertFiles(files) {
+  const body = document.getElementById('certFilesBody');
+  body.innerHTML = '';
+  if (!files.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'muted';
+    td.textContent = document.getElementById('certificateFolder').value.trim()
+      ? 'No certificate files listed for this folder.'
+      : 'Enter a certificate folder to list files.';
+    tr.appendChild(td);
+    body.appendChild(tr);
+    return;
+  }
+
+  for (const file of files) {
+    const tr = document.createElement('tr');
+    tr.className = file.exists ? 'cert-file-row' : 'cert-file-row cert-file-missing';
+
+    const tdName = document.createElement('td');
+    tdName.innerHTML = `<code>${escapeHtml(file.fileName)}</code>`;
+    tr.appendChild(tdName);
+
+    const tdLabel = document.createElement('td');
+    tdLabel.textContent = file.label || '';
+    tr.appendChild(tdLabel);
+
+    const tdStatus = document.createElement('td');
+    tdStatus.innerHTML = file.exists
+      ? '<span class="badge badge-ok">Found</span>'
+      : '<span class="badge badge-err">Missing</span>';
+    tr.appendChild(tdStatus);
+
+    const tdSize = document.createElement('td');
+    tdSize.textContent = formatFileSize(file.sizeBytes);
+    tr.appendChild(tdSize);
+
+    const tdActions = document.createElement('td');
+    const viewBtn = document.createElement('button');
+    viewBtn.type = 'button';
+    viewBtn.className = 'btn';
+    viewBtn.textContent = 'View';
+    viewBtn.disabled = !file.exists;
+    viewBtn.onclick = () => openCertFile(file);
+    tdActions.appendChild(viewBtn);
+    tr.appendChild(tdActions);
+
+    if (file.exists) {
+      tr.title = 'Click row to view file contents';
+      tr.onclick = e => {
+        if (e.target.closest('button')) return;
+        openCertFile(file);
+      };
+    }
+
+    body.appendChild(tr);
+  }
+}
+
+function escapeHtml(text) {
+  return String(text)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+async function loadCertFiles() {
+  const folder = document.getElementById('certificateFolder').value.trim();
+  if (!folder) {
+    renderCertFiles([]);
+    return;
+  }
+
+  try {
+    const r = await fetch('/api/certificates/files', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      renderCertFiles([]);
+      setPathStatus('certFolderStatus', 'folder error', false);
+      return;
+    }
+
+    renderCertFiles(j.files || []);
+    const allFound = (j.files || []).length > 0 && (j.files || []).every(f => f.exists);
+    const anyMissing = (j.files || []).some(f => !f.exists);
+    if (allFound) setPathStatus('certFolderStatus', 'all files found', true);
+    else if (anyMissing) setPathStatus('certFolderStatus', 'missing files', false);
+    else setPathStatus('certFolderStatus', '', true);
+  } catch {
+    renderCertFiles([]);
+    setPathStatus('certFolderStatus', 'list failed', false);
+  }
+}
+
+let certViewContentText = '';
+
+async function openCertFile(file) {
+  const folder = document.getElementById('certificateFolder').value.trim();
+  const dialog = document.getElementById('certViewDialog');
+  const contentEl = document.getElementById('certViewContent');
+  const copyStatus = document.getElementById('certCopyStatus');
+  document.getElementById('certViewTitle').textContent = file.label || 'Certificate file';
+  document.getElementById('certViewFile').textContent = file.fileName;
+  document.getElementById('certViewPath').textContent = file.path || folder;
+  contentEl.textContent = 'Loading...';
+  copyStatus.textContent = '';
+  certViewContentText = '';
+  dialog.showModal();
+
+  try {
+    const r = await fetch('/api/certificates/content', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ folder, fileName: file.fileName }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      contentEl.textContent = j.error || 'Failed to load file';
+      return;
+    }
+    certViewContentText = j.content || '';
+    contentEl.textContent = certViewContentText || '(empty file)';
+  } catch (e) {
+    contentEl.textContent = `Failed to load file: ${e.message}`;
+  }
+}
+
+document.getElementById('certCopy').onclick = async () => {
+  const copyStatus = document.getElementById('certCopyStatus');
+  if (!certViewContentText) {
+    copyStatus.textContent = 'Nothing to copy';
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(certViewContentText);
+    copyStatus.textContent = 'Copied';
+  } catch {
+    copyStatus.textContent = 'Copy failed';
+  }
+};
+
+document.getElementById('certViewClose').onclick = () => document.getElementById('certViewDialog').close();
+document.getElementById('certViewDialog').addEventListener('close', () => {
+  document.getElementById('certCopyStatus').textContent = '';
+});
+
+function updatePathStatusesFromLog(log) {
+  setPathStatus('certFolderStatus', '', true);
+  if (!log) return;
+  const hasFolder = log.some(l => l.includes('Certificate folder:'));
+  const missing = log.some(l => l.includes('file not found'));
+  const allFound = log.filter(l => l.includes(': found at')).length >= 3;
+  if (hasFolder && allFound) setPathStatus('certFolderStatus', 'all files found', true);
+  else if (hasFolder && missing) setPathStatus('certFolderStatus', 'missing files', false);
+  else if (hasFolder) setPathStatus('certFolderStatus', 'checking...', true);
+}
+
+function showConnectionLog(log) {
+  const pre = document.getElementById('connectionLog');
+  pre.textContent = (log && log.length) ? log.join('\n') : 'No log entries.';
+  updatePathStatusesFromLog(log);
+}
+
+function parseHostValue(hostValue) {
+  const raw = (hostValue || '').trim();
+  if (!raw.includes('://')) return raw;
+  try {
+    const u = new URL(raw);
+    return u.hostname;
+  } catch {
+    return raw;
+  }
+}
+
+function updateBrokerPreview() {
+  const scheme = document.getElementById('mqttScheme').value;
+  const host = parseHostValue(document.getElementById('host').value) || 'localhost';
+  const port = Number(document.getElementById('port').value) || 1883;
+  document.getElementById('brokerPreview').textContent = `Connect URL: ${scheme}://${host}:${port}`;
+}
+
+function syncSchemeFromSslTls() {
+  document.getElementById('mqttScheme').value = document.getElementById('sslTls').checked ? 'mqtts' : 'mqtt';
+  updateBrokerPreview();
+}
+
+function syncSslTlsFromScheme() {
+  document.getElementById('sslTls').checked = document.getElementById('mqttScheme').value === 'mqtts';
+  updateBrokerPreview();
+}
+
+function fillEnvForm(env) {
+  document.getElementById('envName').textContent = env.name;
+  document.getElementById('name').value = env.name || '';
+  document.getElementById('host').value = parseHostValue(env.host) || '';
+  document.getElementById('port').value = env.port || 1883;
+  document.getElementById('mqttScheme').value = env.sslTls ? 'mqtts' : 'mqtt';
+  document.getElementById('clientId').value = env.clientId || '';
+  document.getElementById('username').value = env.username || '';
+  document.getElementById('password').value = env.password || '';
+  document.getElementById('keepAliveSeconds').value = env.keepAliveSeconds || 60;
+  document.getElementById('cleanSession').checked = !!env.cleanSession;
+  document.getElementById('sslTls').checked = !!env.sslTls;
+  document.getElementById('sslSecure').checked = !!env.sslSecure;
+  document.getElementById('useNodeMqttBridge').checked = env.useNodeMqttBridge !== false;
+  document.getElementById('alpn').value = env.alpn || '';
+  document.getElementById('certificateType').value = env.certificateType || 'CA';
+  const activeDevice = (config.devices || []).find(
+    d => String(d.deviceId).toLowerCase() === String(config.device?.deviceId || '').toLowerCase()
+  );
+  document.getElementById('certDeviceIdLabel').textContent =
+    activeDevice?.deviceId || config.device?.deviceId || '—';
+  document.getElementById('certificateFolder').value =
+    activeDevice?.certificateFolder
+    || env.certificates?.folder
+    || env.certificates?.caFile?.replace(/[\\/]ca\.crt$/i, '')
+    || '';
+  setPathStatus('certFolderStatus', '', true);
+  updateCertFolderPreview();
+  updateBrokerPreview();
+}
+
+function readEnvForm(env) {
+  env.name = document.getElementById('name').value.trim();
+  env.host = parseHostValue(document.getElementById('host').value);
+  env.port = Number(document.getElementById('port').value) || 1883;
+  env.clientId = document.getElementById('clientId').value.trim();
+  env.username = document.getElementById('username').value.trim();
+  env.password = document.getElementById('password').value;
+  env.keepAliveSeconds = Number(document.getElementById('keepAliveSeconds').value) || 60;
+  env.cleanSession = document.getElementById('cleanSession').checked;
+  env.sslTls = document.getElementById('mqttScheme').value === 'mqtts';
+  document.getElementById('sslTls').checked = env.sslTls;
+  env.sslSecure = document.getElementById('sslSecure').checked;
+  env.useNodeMqttBridge = document.getElementById('useNodeMqttBridge').checked;
+  env.alpn = document.getElementById('alpn').value.trim();
+  env.certificateType = document.getElementById('certificateType').value;
+  // Cert folder is device-scoped; keep env folder as optional fallback only.
+  env.certificates = env.certificates || {};
+  const deviceCertFolder = document.getElementById('certificateFolder').value.trim();
+  const activeDevice = (config.devices || []).find(
+    d => String(d.deviceId).toLowerCase() === String(config.device?.deviceId || '').toLowerCase()
+  );
+  if (activeDevice) {
+    activeDevice.certificateFolder = deviceCertFolder;
+  }
+  // Validate uses the path from the form via env.certificates.folder.
+  env.certificates.folder = deviceCertFolder;
+  env.certificates.caFile = '';
+  env.certificates.clientCertificateFile = '';
+  env.certificates.clientKeyFile = '';
+  return env;
+}
+
+function refreshEnvSelect() {
+  const sel = document.getElementById('envSelect');
+  sel.innerHTML = config.environments.map(e => `<option value="${e.name}">${e.name}</option>`).join('');
+  if (config.activeEnvironment) sel.value = config.activeEnvironment;
+  fillEnvForm(currentEnv());
+}
+
+async function loadConfig() {
+  config = await fetch('/api/config').then(r => r.json());
+  document.getElementById('deviceId').value = config.device.deviceId || '';
+  document.getElementById('equipmentId').value = config.device.equipmentId || '';
+  const activeDevice = (config.devices || []).find(
+    d => String(d.deviceId).toLowerCase() === String(config.device.deviceId).toLowerCase()
+  );
+  document.getElementById('deviceName').value = activeDevice?.name || '';
+  document.getElementById('dssEnrollBaseUrl').value =
+    config.deviceCert?.dssEnrollBaseUrl || 'https://localhost:5004/api/v1';
+  document.getElementById('deviceCertOutputFolder').value =
+    config.deviceCert?.outputFolder || '';
+  document.getElementById('dssRepoRoot').value = config.libs?.dssRepoRoot || '';
+  document.getElementById('syncOnStartup').checked = config.libs?.syncOnStartup !== false;
+  document.getElementById('digimineBaseUrl').value =
+    config.digiMine?.configurationBaseUrl || 'https://digimineconfigurationdev1.irh.ae';
+  document.getElementById('digimineOuId').value =
+    config.digiMine?.operationalUnitId || 'dcf5b0e5-5489-4020-81b3-6377e1d66034';
+  document.getElementById('digimineDeviceTarget').value =
+    config.digiMine?.deviceQueryTarget ||
+    '/configurations?type=object&source=device&categoryId=bgt.mining.devices';
+  document.getElementById('digimineEquipmentTarget').value =
+    config.digiMine?.equipmentQueryTarget ||
+    '/configurations?type=object&source=equipment&categoryId=bgt.mining.equipments';
+  refreshEnvSelect();
+  await loadLibsStatus();
+}
+
+function formatLibTime(iso) {
+  if (!iso) return '—';
+  try {
+    return new Date(iso).toLocaleString();
+  } catch {
+    return iso;
+  }
+}
+
+async function loadLibsStatus() {
+  const badge = document.getElementById('libsStatusBadge');
+  const summary = document.getElementById('libsStatusSummary');
+  const detail = document.getElementById('libsStatusDetail');
+  try {
+    const status = await fetch('/api/libs/status').then(r => r.json());
+    if (!document.getElementById('dssRepoRoot').value.trim() && status.dssRepoRoot) {
+      document.getElementById('dssRepoRoot').value = status.dssRepoRoot;
+    }
+    const pinned = status.pinnedGrpcSharedVersion || '?';
+    const detected = status.detectedGrpcSharedVersion || '—';
+    const mismatch = status.detectedGrpcSharedVersion
+      && status.pinnedGrpcSharedVersion
+      && status.pinnedGrpcSharedVersion !== status.detectedGrpcSharedVersion;
+    badge.textContent = mismatch ? 'version mismatch' : (status.dssRepoExists ? 'ready' : 'DSS path missing');
+    badge.className = 'badge' + (mismatch || !status.dssRepoExists ? ' badge-err' : ' badge-ok');
+    summary.textContent = `Grpc.Shared pinned ${pinned} · DSS ${detected}`;
+    const files = (status.files || []).map(f =>
+      f.exists
+        ? `${f.name}  ${f.length} bytes  ${formatLibTime(f.lastWriteTimeUtc)}`
+        : `${f.name}  (missing)`
+    ).join('\n');
+    detail.textContent =
+      `lib: ${status.libDir}\n` +
+      `DSS: ${status.dssRepoRoot}${status.dssRepoExists ? '' : ' (not found)'}\n` +
+      files;
+  } catch (e) {
+    badge.textContent = 'error';
+    badge.className = 'badge badge-err';
+    summary.textContent = e.message;
+    detail.textContent = 'Failed to load lib status.';
+  }
+}
+
+document.getElementById('importLibs').onclick = async () => {
+  const statusEl = document.getElementById('importLibsStatus');
+  const logEl = document.getElementById('importLibsLog');
+  const dssRepoRoot = document.getElementById('dssRepoRoot').value.trim();
+  statusEl.textContent = 'Importing (build may take a minute)…';
+  logEl.style.display = 'none';
+  logEl.textContent = '';
+  try {
+    const r = await fetch('/api/libs/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dssRepoRoot, configuration: 'Debug' }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      statusEl.textContent = j.error || 'Import failed';
+      return;
+    }
+    statusEl.textContent = j.message || 'Imported';
+    if (j.dssRepoRoot) {
+      document.getElementById('dssRepoRoot').value = j.dssRepoRoot;
+      config.libs = config.libs || {};
+      config.libs.dssRepoRoot = j.dssRepoRoot;
+    }
+    const lines = [
+      `Copied: ${(j.copied || []).map(p => p.split(/[/\\]/).pop()).join(', ')}`,
+      `Grpc.Shared: ${j.previousGrpcSharedVersion || '?'} → ${j.grpcSharedVersion || '?'}`,
+      j.packagesPropsUpdated ? 'Directory.Packages.props updated' : 'Directory.Packages.props unchanged',
+      ...(j.log || []).slice(-20),
+    ];
+    logEl.textContent = lines.join('\n');
+    logEl.style.display = 'block';
+    await loadLibsStatus();
+  } catch (e) {
+    statusEl.textContent = 'Import failed: ' + e.message;
+  }
+};
+
+document.getElementById('envSelect').onchange = () => fillEnvForm(currentEnv());
+document.getElementById('certificateFolder').addEventListener('input', updateCertFolderPreview);
+document.getElementById('certificateFolder').addEventListener('change', updateCertFolderPreview);
+
+['mqttScheme', 'host', 'port'].forEach(id => {
+  document.getElementById(id).addEventListener('input', syncSslTlsFromScheme);
+  document.getElementById(id).addEventListener('change', syncSslTlsFromScheme);
+});
+document.getElementById('sslTls').addEventListener('change', syncSchemeFromSslTls);
+
+document.getElementById('addEnv').onclick = () => {
+  const name = prompt('Environment name');
+  if (!name) return;
+  config.environments.push({
+    name, host: 'localhost', port: 1883, clientId: '', username: '', password: '',
+    sslTls: false, sslSecure: false, useNodeMqttBridge: true, alpn: '', certificateType: 'CA',
+    cleanSession: false, keepAliveSeconds: 60,
+    certificates: { folder: '', caFile: '', clientCertificateFile: '', clientKeyFile: '' }
+  });
+  refreshEnvSelect();
+  document.getElementById('envSelect').value = name;
+  fillEnvForm(currentEnv());
+};
+
+document.getElementById('deleteEnv').onclick = () => {
+  const env = currentEnv();
+  if (!env || config.environments.length <= 1) return;
+  if (!confirm(`Delete environment ${env.name}?`)) return;
+  config.environments = config.environments.filter(e => e !== env);
+  config.activeEnvironment = config.environments[0].name;
+  refreshEnvSelect();
+};
+
+document.getElementById('validate').onclick = async () => {
+  const env = readEnvForm({ ...currentEnv(), certificates: { ...currentEnv().certificates } });
+  const validateStatus = document.getElementById('validateStatus');
+  validateStatus.textContent = 'validating...';
+  validateStatus.className = 'badge';
+  showConnectionLog(['Starting validation...']);
+  try {
+    const r = await fetch('/api/validate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        environment: env,
+        deviceId: document.getElementById('deviceId').value.trim()
+      })
+    });
+    const j = await r.json();
+    showConnectionLog(j.log || []);
+    if (j.ok) {
+      validateStatus.textContent = `OK (${j.elapsedMs}ms)`;
+      validateStatus.className = 'badge badge-ok';
+    } else {
+      validateStatus.textContent = j.step ? `failed (${j.step})` : 'failed';
+      validateStatus.className = 'badge badge-err';
+    }
+  } catch (e) {
+    validateStatus.textContent = 'error';
+    validateStatus.className = 'badge badge-err';
+    showConnectionLog([`Request failed: ${e.message}`]);
+  }
+};
+
+document.getElementById('save').onclick = async () => {
+  readEnvForm(currentEnv());
+  const deviceId = document.getElementById('deviceId').value.trim();
+  const deviceName = document.getElementById('deviceName').value.trim();
+  config.device.deviceId = deviceId;
+  config.device.equipmentId = document.getElementById('equipmentId').value.trim();
+  config.devices = config.devices || [];
+  const activeEntry = config.devices.find(
+    d => String(d.deviceId).toLowerCase() === deviceId.toLowerCase()
+  );
+  if (activeEntry) {
+    activeEntry.name = deviceName;
+    activeEntry.equipmentId = config.device.equipmentId;
+    activeEntry.certificateFolder = document.getElementById('certificateFolder').value.trim();
+  }
+  config.deviceCert = config.deviceCert || {};
+  config.deviceCert.dssEnrollBaseUrl = document.getElementById('dssEnrollBaseUrl').value.trim();
+  config.deviceCert.outputFolder = document.getElementById('deviceCertOutputFolder').value.trim();
+  config.libs = config.libs || {};
+  config.libs.dssRepoRoot = document.getElementById('dssRepoRoot').value.trim();
+  config.libs.syncOnStartup = document.getElementById('syncOnStartup').checked;
+  config.digiMine = config.digiMine || {};
+  config.digiMine.configurationBaseUrl = document.getElementById('digimineBaseUrl').value.trim();
+  config.digiMine.operationalUnitId = document.getElementById('digimineOuId').value.trim();
+  config.digiMine.deviceQueryTarget = document.getElementById('digimineDeviceTarget').value.trim();
+  config.digiMine.equipmentQueryTarget = document.getElementById('digimineEquipmentTarget').value.trim();
+  config.activeEnvironment = currentEnv().name;
+  document.getElementById('saveStatus').textContent = 'saving...';
+  const r = await fetch('/api/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config)
+  });
+  const j = await r.json();
+  document.getElementById('saveStatus').textContent = r.ok
+    ? (j.reconnected ? 'saved and reconnected with new device ID' : 'saved')
+    : (j.error || 'failed');
+  if (r.ok) await loadConfig();
+};
+
+loadConfig().catch(e => document.getElementById('saveStatus').textContent = e.message);
+</script>
+</body>
+</html>

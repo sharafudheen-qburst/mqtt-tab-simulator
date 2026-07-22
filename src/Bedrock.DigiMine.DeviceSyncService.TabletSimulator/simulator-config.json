@@ -1,0 +1,75 @@
+{
+  "activeEnvironment": "LOCAL",
+  "device": {
+    "deviceId": "49af6ebb-a816-48d6-a496-e5a147bfbc26",
+    "equipmentId": "f13f3437-3fd1-40c6-ac54-5b2119d16d66"
+  },
+  "web": {
+    "port": 5055
+  },
+  "deviceCert": {
+    "dssEnrollBaseUrl": "https://localhost:5004/api/v1",
+    "outputFolder": "C:\\Work\\IRH_Solutions\\standalone\\tools\\irh-tool-dashboard\\backend\\data\\device-certs"
+  },
+  "digiMine": {
+    "configurationBaseUrl": "https://digimineconfigurationdev1.irh.ae",
+    "operationalUnitId": "dcf5b0e5-5489-4020-81b3-6377e1d66034",
+    "deviceQueryTarget": "/configurations?type=object&source=device&categoryId=bgt.mining.devices",
+    "equipmentQueryTarget": "/configurations?type=object&source=equipment&categoryId=bgt.mining.equipments"
+  },
+  "environments": [
+    {
+      "name": "LOCAL",
+      "host": "localhost",
+      "port": 1883,
+      "clientId": "",
+      "username": "dss",
+      "password": "",
+      "sslTls": false,
+      "sslSecure": false,
+      "alpn": "",
+      "certificateType": "CA",
+      "cleanSession": false,
+      "keepAliveSeconds": 60,
+      "certificates": {
+        "folder": ""
+      }
+    },
+    {
+      "name": "DEV",
+      "host": "10.10.127.155",
+      "port": 31884,
+      "clientId": "abcdef",
+      "username": "",
+      "password": "",
+      "sslTls": true,
+      "sslSecure": false,
+      "useNodeMqttBridge": true,
+      "alpn": "",
+      "certificateType": "CA",
+      "cleanSession": false,
+      "keepAliveSeconds": 60,
+      "certificates": {
+        "folder": "C:\\Work\\IRH\\Cred\\mqttz dev cert\\new"
+      }
+    },
+    {
+      "name": "QA",
+      "host": "10.20.127.4",
+      "port": 31884,
+      "clientId": "abcdef",
+      "username": "",
+      "password": "",
+      "sslTls": true,
+      "sslSecure": false,
+      "useNodeMqttBridge": true,
+      "alpn": "",
+      "certificateType": "CA",
+      "cleanSession": false,
+      "keepAliveSeconds": 60,
+      "certificates": {
+        "folder": "C:\\Work\\IRH\\Cred\\mqttz dev cert\\new"
+      }
+    }
+  ]
+}

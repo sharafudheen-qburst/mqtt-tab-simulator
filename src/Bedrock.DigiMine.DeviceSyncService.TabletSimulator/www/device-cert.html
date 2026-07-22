@@ -1,0 +1,340 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tablet Simulator — Device cert</title>
+<link rel="stylesheet" href="/common.css">
+</head>
+<body>
+<nav>
+  <strong>Tablet Simulator</strong>
+  <a href="/">Devices</a>
+  <a href="/home.html">Home</a>
+  <a href="/settings.html">Settings</a>
+  <a href="/device-cert.html">Device cert</a>
+</nav>
+<div class="container">
+<h1>Device certificate</h1>
+<p class="muted">Generate a CSR (CN = Device ID), copy the Postman body, enroll manually, then paste the response to create <code>ca.crt</code>, <code>client.crt</code>, and <code>client.key</code> in your certificate folder.</p>
+
+<div class="card">
+  <div class="form-group">
+    <label for="deviceId">Device ID</label>
+    <input type="text" id="deviceId" placeholder="3f794553-935c-4aa4-87dd-56a7497ece0c" spellcheck="false">
+  </div>
+
+  <div class="form-group">
+    <label>Key algorithm</label>
+    <div class="row cert-key-options">
+      <label><input type="radio" name="algorithm" value="rsa" checked> RSA (2048)</label>
+      <label><input type="radio" name="algorithm" value="ecdsa"> ECDSA (secp521r1)</label>
+    </div>
+  </div>
+
+  <div class="form-group">
+    <label for="dssEnrollBaseUrl">DSS enroll API base URL</label>
+    <input type="text" id="dssEnrollBaseUrl" class="path-input" placeholder="https://localhost:5004/api/v1">
+    <p class="muted">Saved in <code>simulator-config.json</code> when you save settings or generate.</p>
+  </div>
+
+  <div class="form-group">
+    <label for="deviceCertOutputFolder">Device cert output folder</label>
+    <input type="text" id="deviceCertOutputFolder" class="path-input" placeholder="C:\path\to\device-certs">
+    <p class="muted">Saved in <code>simulator-config.json</code>. Cert files are written to <code>{folder}\{deviceId}\</code> (or <code>{deviceId}-1</code>, <code>{deviceId}-2</code>, … if that folder already exists).</p>
+  </div>
+
+  <p class="muted">Next save path: <code id="certSavePathLabel">—</code></p>
+
+  <button type="button" class="btn btn-primary" id="generate">Generate CSR &amp; Key</button>
+  <span id="generateStatus" class="muted"></span>
+</div>
+
+<div id="resultPanel" class="card" style="display:none;">
+  <p class="badge badge-ok" id="resultSummary"></p>
+
+  <div class="cert-block-header">
+    <h2>Postman body (compact JSON)</h2>
+    <button type="button" class="btn" id="copyPostmanBody">Copy</button>
+  </div>
+  <pre id="postmanBody" class="cert-block"></pre>
+
+  <div class="cert-block-header">
+    <h2>Enroll URL</h2>
+    <button type="button" class="btn" id="copyEnrollUrl">Copy</button>
+  </div>
+  <pre id="enrollUrl" class="cert-block cert-block-inline"></pre>
+
+  <div class="cert-block-header">
+    <h2>CSR PEM</h2>
+    <button type="button" class="btn" id="copyCsr">Copy</button>
+  </div>
+  <pre id="csrPem" class="cert-block"></pre>
+
+  <div class="cert-block-header">
+    <h2>Private key PEM</h2>
+    <button type="button" class="btn" id="copyKey">Copy</button>
+  </div>
+  <pre id="privateKeyPem" class="cert-block"></pre>
+  <p class="muted">Keep the private key until you save cert files. It is not included in the Postman response.</p>
+
+  <div class="form-group" style="margin-top:1rem;">
+    <label for="enrollResponse">Paste Postman enroll response JSON</label>
+    <textarea id="enrollResponse" rows="8" placeholder='{"certificatePem":"-----BEGIN CERTIFICATE-----\n...","caChainPem":"..."}' spellcheck="false"></textarea>
+  </div>
+
+  <button type="button" class="btn btn-primary" id="saveBundle">Save cert files</button>
+  <span id="saveStatus" class="muted"></span>
+  <p id="saveWarnings" class="muted" style="display:none;"></p>
+</div>
+
+<div id="registrationPanel" class="card" style="display:none;">
+  <p class="badge badge-ok">Next: register equipment with this device in Postman</p>
+  <p class="muted">POST the body below to bind equipment to the device after cert enrollment.</p>
+
+  <div class="cert-block-header">
+    <h2>Registration URL</h2>
+    <button type="button" class="btn" id="copyRegistrationUrl">Copy</button>
+  </div>
+  <pre id="registrationUrl" class="cert-block cert-block-inline"></pre>
+
+  <div class="cert-block-header">
+    <h2>Registration body (JSON)</h2>
+    <button type="button" class="btn" id="copyRegistrationBody">Copy</button>
+  </div>
+  <pre id="registrationBody" class="cert-block"></pre>
+</div>
+</div>
+
+<script>
+let generateResult = null;
+let registrationResult = null;
+
+function selectedAlgorithm() {
+  const checked = document.querySelector('input[name="algorithm"]:checked');
+  return checked ? checked.value : 'ecdsa';
+}
+
+async function copyText(text, labelEl, message) {
+  if (!text) return;
+  try {
+    await navigator.clipboard.writeText(text);
+    if (labelEl) labelEl.textContent = message || 'Copied';
+  } catch {
+    if (labelEl) labelEl.textContent = 'Copy failed';
+  }
+}
+
+async function loadConfig() {
+  const [config, certConfig] = await Promise.all([
+    fetch('/api/config').then(r => r.json()),
+    fetch('/api/device-cert/config').then(r => r.json()),
+  ]);
+  document.getElementById('deviceId').value = certConfig.deviceId || config.device?.deviceId || '';
+  document.getElementById('dssEnrollBaseUrl').value =
+    certConfig.dssEnrollBaseUrl || config.deviceCert?.dssEnrollBaseUrl || 'https://localhost:5004/api/v1';
+  document.getElementById('deviceCertOutputFolder').value =
+    config.deviceCert?.outputFolder || certConfig.outputFolder || '';
+  document.getElementById('certSavePathLabel').textContent =
+    certConfig.savePathPreview || certConfig.outputFolder || '(default device-certs folder)';
+}
+
+async function persistDeviceCertSettings() {
+  const config = await fetch('/api/config').then(r => r.json());
+  config.deviceCert = config.deviceCert || {};
+  config.deviceCert.dssEnrollBaseUrl = document.getElementById('dssEnrollBaseUrl').value.trim();
+  config.deviceCert.outputFolder = document.getElementById('deviceCertOutputFolder').value.trim();
+  await fetch('/api/config', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+}
+
+async function refreshSavePathPreview() {
+  try {
+    const certConfig = await fetch('/api/device-cert/config').then(r => r.json());
+    document.getElementById('certSavePathLabel').textContent =
+      certConfig.savePathPreview || certConfig.outputFolder || '—';
+  } catch {
+    // ignore
+  }
+}
+
+document.getElementById('generate').onclick = async () => {
+  const deviceId = document.getElementById('deviceId').value.trim();
+  const status = document.getElementById('generateStatus');
+  if (!deviceId) {
+    status.textContent = 'Device ID is required.';
+    return;
+  }
+
+  status.textContent = 'Generating...';
+  document.getElementById('resultPanel').style.display = 'none';
+  document.getElementById('registrationPanel').style.display = 'none';
+  generateResult = null;
+  registrationResult = null;
+
+  try {
+    await persistDeviceCertSettings();
+  await refreshSavePathPreview();
+    const r = await fetch('/api/device-cert/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ deviceId, algorithm: selectedAlgorithm() }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      status.textContent = j.error || 'Generate failed';
+      return;
+    }
+
+    generateResult = j;
+    status.textContent = '';
+    document.getElementById('resultPanel').style.display = 'block';
+    document.getElementById('resultSummary').textContent =
+      `CSR generated for ${j.deviceId} using ${j.keyAlgorithm}. Use the same algorithm in Postman — the enroll response must match this private key.`;
+    document.getElementById('postmanBody').textContent = j.enrollPayloadJson || '';
+    document.getElementById('enrollUrl').textContent = j.enrollUrl || '';
+    document.getElementById('csrPem').textContent = j.csrPem || '';
+    document.getElementById('privateKeyPem').textContent = j.privateKeyPem || '';
+    document.getElementById('saveStatus').textContent = '';
+    document.getElementById('saveWarnings').style.display = 'none';
+    document.getElementById('registrationPanel').style.display = 'none';
+    registrationResult = null;
+  } catch (e) {
+    status.textContent = 'Generate failed: ' + e.message;
+  }
+};
+
+document.getElementById('copyPostmanBody').onclick = async () => {
+  const el = document.getElementById('copyPostmanBody');
+  await copyText(generateResult?.enrollPayloadJson || '', el, 'Copied');
+  setTimeout(() => { el.textContent = 'Copy'; }, 1500);
+};
+
+document.getElementById('copyEnrollUrl').onclick = async () => {
+  const el = document.getElementById('copyEnrollUrl');
+  await copyText(generateResult?.enrollUrl || '', el, 'Copied');
+  setTimeout(() => { el.textContent = 'Copy'; }, 1500);
+};
+
+document.getElementById('copyCsr').onclick = async () => {
+  const el = document.getElementById('copyCsr');
+  await copyText(generateResult?.csrPem || '', el, 'Copied');
+  setTimeout(() => { el.textContent = 'Copy'; }, 1500);
+};
+
+document.getElementById('copyKey').onclick = async () => {
+  const el = document.getElementById('copyKey');
+  await copyText(generateResult?.privateKeyPem || '', el, 'Copied');
+  setTimeout(() => { el.textContent = 'Copy'; }, 1500);
+};
+
+document.getElementById('copyRegistrationUrl').onclick = async () => {
+  const el = document.getElementById('copyRegistrationUrl');
+  await copyText(registrationResult?.registrationUrl || '', el, 'Copied');
+  setTimeout(() => { el.textContent = 'Copy'; }, 1500);
+};
+
+document.getElementById('copyRegistrationBody').onclick = async () => {
+  const el = document.getElementById('copyRegistrationBody');
+  await copyText(registrationResult?.registrationPayloadJson || '', el, 'Copied');
+  setTimeout(() => { el.textContent = 'Copy'; }, 1500);
+};
+
+document.getElementById('saveBundle').onclick = async () => {
+  const saveStatus = document.getElementById('saveStatus');
+  const saveWarnings = document.getElementById('saveWarnings');
+  if (!generateResult?.privateKeyPem) {
+    saveStatus.textContent = 'Generate CSR & Key first.';
+    return;
+  }
+
+  const responseText = document.getElementById('enrollResponse').value.trim();
+  if (!responseText) {
+    saveStatus.textContent = 'Paste the Postman response JSON.';
+    return;
+  }
+
+  let enrollResponse;
+  try {
+    enrollResponse = JSON.parse(responseText);
+  } catch {
+    saveStatus.textContent = 'Response must be valid JSON.';
+    return;
+  }
+
+  saveStatus.textContent = 'Saving...';
+  saveWarnings.style.display = 'none';
+
+  await persistDeviceCertSettings();
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 15000);
+
+  try {
+    const r = await fetch('/api/device-cert/save-bundle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        deviceId: generateResult.deviceId,
+        privateKeyPem: generateResult.privateKeyPem,
+        enrollResponse,
+      }),
+    });
+    clearTimeout(timeoutId);
+    const j = await r.json();
+    if (!r.ok) {
+      saveStatus.textContent = j.error || 'Save failed';
+      return;
+    }
+
+    const names = (j.files || []).map(f => f.split(/[/\\]/).pop()).join(', ');
+    saveStatus.textContent = `Saved to ${j.outputDir}: ${names}`;
+    const warnings = [j.certKeyWarning, j.pfxWarning].filter(Boolean);
+    if (warnings.length) {
+      saveWarnings.textContent = warnings.join(' ');
+      saveWarnings.style.display = 'block';
+    }
+
+    registrationResult = j;
+    const regPanel = document.getElementById('registrationPanel');
+    if (j.registrationUrl) {
+      document.getElementById('registrationUrl').textContent = j.registrationUrl;
+      document.getElementById('registrationBody').textContent = j.registrationPayloadJson || '';
+      regPanel.style.display = 'block';
+      regPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } else {
+      regPanel.style.display = 'none';
+    }
+    await loadConfig();
+  } catch (e) {
+    clearTimeout(timeoutId);
+    saveStatus.textContent = e.name === 'AbortError'
+      ? 'Save timed out after 15s. Restart the simulator and try again.'
+      : 'Save failed: ' + e.message;
+  }
+};
+
+loadConfig().catch(e => {
+  document.getElementById('generateStatus').textContent = 'Failed to load config: ' + e.message;
+});
+
+['deviceId', 'deviceCertOutputFolder'].forEach(id => {
+  document.getElementById(id).addEventListener('input', () => {
+    const base = document.getElementById('deviceCertOutputFolder').value.trim();
+    const deviceId = document.getElementById('deviceId').value.trim();
+    const label = document.getElementById('certSavePathLabel');
+    if (!base) {
+      label.textContent = '—';
+      return;
+    }
+    label.textContent = deviceId
+      ? `${base}\\${deviceId} (or ${deviceId}-1, ${deviceId}-2, … if folder exists)`
+      : `${base}\\{deviceId}`;
+  });
+});
+</script>
+</body>
+</html>
