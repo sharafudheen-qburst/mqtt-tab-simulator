@@ -17,6 +17,38 @@
 <h1>Devices</h1>
 <p class="muted">Select a device to open the simulator (Home and Settings). Devices (including name/details) are stored in SQLite (<code>simulator.db</code>) and mirrored in <code>simulator-config.json</code>.</p>
 
+<div class="card mqtt-session-panel">
+  <div class="row inbound-toolbar" style="margin-bottom:8px;">
+    <strong>MQTT sessions</strong>
+    <span id="mqttSessionSummary" class="muted"></span>
+  </div>
+  <div class="row mqtt-session-bar">
+    <button type="button" class="btn btn-danger" id="disconnectAll">Close all MQTT</button>
+    <label class="inline-check"><input type="checkbox" id="autoDisposeEnabled" checked> Auto-close after</label>
+    <input type="number" id="autoDisposeMinutes" min="1" max="1440" value="60" style="min-width:80px;width:80px;">
+    <span class="muted">min</span>
+    <button type="button" class="btn" id="applyAutoDispose">Apply</button>
+    <span id="autoDisposeStatus" class="muted"></span>
+  </div>
+  <div class="table-scroll" style="max-height:180px;margin-top:8px;">
+    <table>
+      <thead>
+        <tr><th>Device</th><th>Env</th><th>Broker</th><th>Connected</th><th>Auto-close</th></tr>
+      </thead>
+      <tbody id="sessionBody"></tbody>
+    </table>
+  </div>
+</div>
+
+<details class="card" open>
+  <summary>Global MQTT log</summary>
+  <div class="row inbound-toolbar" style="margin-top:8px;">
+    <button type="button" class="btn" id="clearMqttLog">Clear log</button>
+    <span id="mqttLogCount" class="muted"></span>
+  </div>
+  <pre id="mqttGlobalLog" class="mqtt-log">No MQTT events yet.</pre>
+</details>
+
 <div class="row device-toolbar">
   <button type="button" class="btn btn-primary" id="addDevice">Add device</button>
   <span id="deviceStatus" class="muted"></span>
@@ -35,6 +67,31 @@
 <script>
 const deviceBody = document.getElementById('deviceBody');
 const deviceStatus = document.getElementById('deviceStatus');
+const sessionBody = document.getElementById('sessionBody');
+const mqttSessionSummary = document.getElementById('mqttSessionSummary');
+const mqttGlobalLog = document.getElementById('mqttGlobalLog');
+const mqttLogCount = document.getElementById('mqttLogCount');
+const autoDisposeEnabled = document.getElementById('autoDisposeEnabled');
+const autoDisposeMinutes = document.getElementById('autoDisposeMinutes');
+const autoDisposeStatus = document.getElementById('autoDisposeStatus');
+const mqttLogLines = [];
+const MAX_MQTT_LOG_LINES = 400;
+
+const istFormatter = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+
+function formatTimeIst(iso) {
+  if (!iso) return '—';
+  return istFormatter.format(new Date(iso)).replace(/\//g, '-');
+}
 
 async function loadDevices() {
   deviceStatus.textContent = 'Loading...';
@@ -44,9 +101,71 @@ async function loadDevices() {
     deviceStatus.textContent = data.devices?.length
       ? `${data.devices.length} device(s)`
       : 'No devices yet — add one to get started.';
+    if (typeof data.autoDisposeEnabled === 'boolean') {
+      autoDisposeEnabled.checked = data.autoDisposeEnabled;
+    }
+    if (data.autoDisposeMinutes) {
+      autoDisposeMinutes.value = String(data.autoDisposeMinutes);
+    }
   } catch (e) {
     deviceStatus.textContent = 'Failed to load devices: ' + e.message;
     deviceBody.innerHTML = '';
+  }
+}
+
+async function loadSessions() {
+  try {
+    const data = await fetch('/api/mqtt/sessions').then(r => r.json());
+    renderSessions(data.sessions || []);
+    mqttSessionSummary.textContent = data.connectedCount
+      ? `${data.connectedCount} connected`
+      : 'none connected';
+    if (typeof data.autoDisposeEnabled === 'boolean') {
+      autoDisposeEnabled.checked = data.autoDisposeEnabled;
+    }
+    if (data.autoDisposeMinutes) {
+      autoDisposeMinutes.value = String(data.autoDisposeMinutes);
+    }
+    if (!data.autoDisposeEnabled) {
+      autoDisposeStatus.textContent = 'Auto-close off';
+    } else if (data.autoDisposeAt) {
+      autoDisposeStatus.textContent = `Auto-close at ${formatTimeIst(data.autoDisposeAt)} IST`;
+    } else {
+      autoDisposeStatus.textContent = `Auto-close after ${data.autoDisposeMinutes || 60} min when connected`;
+    }
+  } catch (e) {
+    mqttSessionSummary.textContent = 'Failed to load sessions';
+    sessionBody.innerHTML = '';
+  }
+}
+
+function renderSessions(sessions) {
+  sessionBody.innerHTML = '';
+  if (!sessions.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 5;
+    td.className = 'muted';
+    td.textContent = 'No MQTT session.';
+    tr.appendChild(td);
+    sessionBody.appendChild(tr);
+    return;
+  }
+
+  for (const s of sessions) {
+    const tr = document.createElement('tr');
+    const label = (s.name && s.name.trim()) || s.deviceId;
+    tr.innerHTML = `
+      <td>${escapeHtml(label)}<div class="muted"><code>${escapeHtml(s.deviceId)}</code></div></td>
+      <td>${escapeHtml(s.environment || '—')}</td>
+      <td><code>${escapeHtml(s.broker || '—')}</code></td>
+      <td>${s.connected
+        ? `<span class="badge badge-ok">Connected</span>${s.usesNodeBridge ? ' <span class="muted">Node</span>' : ''}<div class="muted">${escapeHtml(formatTimeIst(s.connectedAt))}</div>`
+        : '<span class="badge badge-err">Disconnected</span>'}</td>
+      <td class="muted">${s.connected && s.autoDisposeAt
+        ? escapeHtml(formatTimeIst(s.autoDisposeAt)) + ' IST'
+        : (s.autoDisposeEnabled ? (s.autoDisposeMinutes || 60) + ' min' : 'off')}</td>`;
+    sessionBody.appendChild(tr);
   }
 }
 
@@ -79,9 +198,16 @@ function renderDevices(devices, activeDeviceId) {
     tr.appendChild(tdId);
 
     const tdStatus = document.createElement('td');
-    tdStatus.innerHTML = isActive
-      ? '<span class="badge badge-ok">Active</span>'
-      : '<span class="badge">—</span>';
+    const badges = [];
+    if (isActive) badges.push('<span class="badge badge-ok">Active</span>');
+    if (device.mqttConnected) {
+      badges.push('<span class="badge badge-ok">MQTT</span>');
+    } else if (isActive) {
+      badges.push('<span class="badge">MQTT off</span>');
+    } else {
+      badges.push('<span class="badge">—</span>');
+    }
+    tdStatus.innerHTML = badges.join(' ');
     tr.appendChild(tdStatus);
 
     const tdActions = document.createElement('td');
@@ -112,6 +238,32 @@ function escapeHtml(text) {
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
+}
+
+function appendMqttLog(entry) {
+  const at = entry.at ? formatTimeIst(entry.at) : '';
+  const level = (entry.level || 'info').toUpperCase();
+  const device = entry.deviceId ? ` [${String(entry.deviceId).slice(0, 8)}…]` : '';
+  const line = `${at} ${level}${device} ${entry.message || ''}`;
+  mqttLogLines.push(line);
+  while (mqttLogLines.length > MAX_MQTT_LOG_LINES) mqttLogLines.shift();
+  mqttGlobalLog.textContent = mqttLogLines.join('\n');
+  mqttGlobalLog.scrollTop = mqttGlobalLog.scrollHeight;
+  mqttLogCount.textContent = `${mqttLogLines.length} line(s)`;
+}
+
+async function loadMqttLog() {
+  try {
+    const j = await fetch('/api/mqtt/log?limit=200').then(r => r.json());
+    mqttLogLines.length = 0;
+    for (const entry of j.entries || []) appendMqttLog(entry);
+    if (!mqttLogLines.length) {
+      mqttGlobalLog.textContent = 'No MQTT events yet.';
+      mqttLogCount.textContent = '';
+    }
+  } catch (err) {
+    console.warn('Failed to load MQTT log:', err);
+  }
 }
 
 async function editDeviceName(deviceId, currentName) {
@@ -164,7 +316,64 @@ document.getElementById('addDevice').onclick = () => {
   window.location.href = '/add-device.html';
 };
 
+document.getElementById('disconnectAll').onclick = async () => {
+  mqttSessionSummary.textContent = 'Closing...';
+  try {
+    const r = await fetch('/api/mqtt/disconnect-all', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) {
+      mqttSessionSummary.textContent = j.error || 'Failed';
+      return;
+    }
+    await Promise.all([loadSessions(), loadDevices()]);
+  } catch (e) {
+    mqttSessionSummary.textContent = 'Failed: ' + e.message;
+  }
+};
+
+document.getElementById('applyAutoDispose').onclick = async () => {
+  const minutes = Math.max(1, Number(autoDisposeMinutes.value) || 60);
+  autoDisposeMinutes.value = String(minutes);
+  try {
+    const r = await fetch('/api/mqtt/auto-dispose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: autoDisposeEnabled.checked, minutes }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      autoDisposeStatus.textContent = j.error || 'failed';
+      return;
+    }
+    await loadSessions();
+  } catch (e) {
+    autoDisposeStatus.textContent = String(e);
+  }
+};
+
+document.getElementById('clearMqttLog').onclick = async () => {
+  mqttLogLines.length = 0;
+  mqttGlobalLog.textContent = 'No MQTT events yet.';
+  mqttLogCount.textContent = '';
+  try {
+    await fetch('/api/mqtt/log', { method: 'DELETE' });
+  } catch (err) {
+    console.warn('Failed to clear MQTT log:', err);
+  }
+};
+
 loadDevices();
+loadSessions();
+loadMqttLog();
+
+const es = new EventSource('/api/events');
+es.addEventListener('mqttLog', e => {
+  try { appendMqttLog(JSON.parse(e.data)); } catch { /* ignore */ }
+});
+es.addEventListener('session', () => {
+  loadSessions();
+  loadDevices();
+});
 </script>
 </body>
 </html>

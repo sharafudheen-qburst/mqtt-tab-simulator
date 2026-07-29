@@ -268,6 +268,21 @@ POST
 POST
 /api/disconnect
 Disconnect MQTT
+GET
+/api/mqtt/sessions
+Active MQTT session snapshot(s) + auto-dispose status
+POST
+/api/mqtt/disconnect-all
+Close MQTT session (unsubscribe + disconnect + stop Node listener)
+POST
+/api/mqtt/auto-dispose
+`{ enabled, minutes? }` — default 60 minutes; schedules dispose after connect
+GET
+/api/mqtt/log
+Recent global MQTT lifecycle log (`?limit=200`)
+DELETE
+/api/mqtt/log
+Clear in-memory MQTT activity log
 POST
 /api/validate
 { environment, deviceId? } — probe without switching session
@@ -288,13 +303,22 @@ POST
 PEM → PFX for Windows Schannel
 POST
 /api/decode
-{ topic, payloadHex } — re-decode with current ProtoDecoder / Grpc.Shared (used by inbound “Decoded log” view)
+{ topic, payloadHex } — re-decode with current ProtoDecoder / Grpc.Shared (used by inbound “Decoded log” view); also returns `payloadJson` for editor sync
+POST
+/api/encode
+{ topic, json } — encode protobuf JSON via `MqttProtoEncoder` → `{ payloadHex, messageType, payloadLength }` (live hex preview)
+GET
+/api/presets/sync-full
+Default Sync FULL for active device: `{ topic, json, payloadHex, messageType, deviceId, equipmentId }`
 GET
 /api/inbound
-Recent inbound messages (server memory)
+Recent inbound messages (server memory/SQLite; default limit 2000)
+GET
+/api/inbound/{sequence}
+Full inbound message including `payloadHex` (used when live SSE omitted hex)
 GET
 /api/events
-SSE stream of inbound messages
+SSE stream: unnamed = inbound live messages (summary truncated, no hex); `event: mqttLog` / `event: session` for lifecycle (no inbound history dump on connect)
 POST
 /api/publish
 { topic, payload? } or { topic, preset? } — payload may be hex, file, or JSON (JSON encoded via MqttProtoEncoder)
@@ -312,7 +336,11 @@ Config models, broker URL helpers
 Configuration/SimulatorConfigStore.cs
 Load/save JSON, cert uploads, CLI parsing
 Mqtt/TabletMqttClient.cs
-Core MQTT: connect, subscribe, publish, inbound queue
+Core MQTT: connect, subscribe, publish, inbound queue, auto-dispose timer
+Mqtt/MqttActivityLog.cs
+In-memory global MQTT lifecycle log (ring buffer)
+Mqtt/MqttSessionSnapshot.cs
+Session DTO for status / Devices panel
 Mqtt/TabletTopicCatalog.cs
 Topic resolution (uplink/downlink)
 Mqtt/TabletPayloadFactory.cs
@@ -365,17 +393,18 @@ Optional env: NODE_BINARY for custom node path
 12. Web UI Features
 Devices (devices.html) — landing at /
 List saved devices (SQLite `devices` table + mirrored in simulator-config.json)
+MQTT sessions panel (connected badge, broker, auto-close time) + Close all MQTT
+Global MQTT log (live via SSE `mqttLog`)
 Add device (device ID + optional name/details; equipment ID auto-generated)
 Edit name — Edit name on Devices row updates SQLite + config
 Select & open → Home for that device
 Home (home.html / index.html)
 Device/equipment ID display
-Environment selector + Connect/Disconnect
-Connection log panel
-Inbound table (service → device): SSE live updates, search, event type column, view decoded log / hex payload, export JSON, clear
-localStorage persistence (tabletSimulator.inboundMessages, max 500)
+Environment selector + Connect/Disconnect/Close all MQTT + auto-dispose (default 1 hour)
+Global MQTT log + last connection attempt panel
+Inbound table (service → device): SSE live updates (incremental rows), search, event type column, view decoded log / hex payload, export JSON, clear; visible cap 500 rows; after Sync FULL polls `/api/inbound` for ~25s so burst replies are not missed; light localStorage (no hex)
 Times shown in IST (Asia/Kolkata)
-Publish section: custom topic + hex payload, retain flag, presets (Sync FULL, Heartbeat)
+Publish section: topic + editable Sync FULL JSON textarea (max 400px, auto-encodes to hex via `/api/encode`) + hex payload field; Sync FULL loads default SyncRequest for active device/equipment then publishes; Heartbeat preset publishes immediately; retain flag. Inbound table is downlink-only.
 Settings (settings.html)
 Multi-environment CRUD (add/delete)
 Active device ID (read-only; managed on Devices page) / Equipment ID editable
@@ -404,14 +433,18 @@ TabletMqttClient.ReconnectAsync: uses probe timeout
 Web connect button: 30s client-side abort
 14. Timeouts, Limits & Error Handling
 Limit	Value
-Max inbound messages (server)
-500
+Max inbound messages (server SQLite)
+5000
 Max inbound messages (browser localStorage)
+2000
+Visible inbound rows (Home)
 500
 Connection timeout
 20–25s
 SSE keepalive ping
 every 15s
+Auto-dispose MQTT
+1 hour after connect (default; configurable; disable via UI)
 Startup MQTT connect failure is non-fatal — app still launches web UI with message to fix settings.
 
 15. Build Details (csproj)
@@ -484,6 +517,12 @@ Shared DLLs from lib/ (DSS Domain + ProtoDecoder). See PROJECT_SNAPSHOT.md.
 
 | Date & time (UTC) | Change |
 |-------------------|--------|
+| 2026-07-29 | Inbound table: Refresh button reloads all from SQLite; fixed incremental-render race that could show only one row; lighter localStorage cache (truncated summaries). |
+| 2026-07-29 | Fixed Node bridge clientId collision: listen/publish used same `environment.ClientId`, so Sync FULL publish kicked the listener and downlink never arrived. Handlers now attach before subscribe-ready; Global MQTT log shows each inbound receipt; UI shows subscription READY + confirmed topics. |
+| 2026-07-29 | FULL sync downlink hardening: wait for all MQTT subscriptions before connect-ready; ordered Node inbound queue so bursts are not dropped; slim live SSE (no hex); post–Sync FULL inbound refresh for 25s; visible inbound rows raised to 500; `GET /api/inbound/{sequence}` for full payload. |
+| 2026-07-29 | Sync FULL button again publishes after loading JSON/hex; clarified Inbound is downlink-only (uplink Sync FULL will not appear in that table). |
+| 2026-07-28 | Home publish: Sync FULL JSON editor (max 400px) with live JSON↔hex via ProtoDecoder; `POST /api/encode`, `GET /api/presets/sync-full`; `/api/decode` returns `payloadJson`. Sync FULL loads editable preset (device/equipment IDs) instead of immediate publish. |
+| 2026-07-28 | Global MQTT log + session panel; Close all MQTT; 1h auto-dispose (configurable); Home inbound UI perf (incremental rows, debounced light localStorage, no SSE history dump); APIs `/api/mqtt/sessions`, `/api/mqtt/log`, `/api/mqtt/disconnect-all`, `/api/mqtt/auto-dispose`; SSE `mqttLog`/`session` events. |
 | 2026-07-20 | Disconnect cleanup: unsubscribe before MQTT disconnect; Node listener stop via stdin `{"cmd":"stop"}` (unsubscribe + `client.end`) before process kill; Home notes browser close does not drop MQTT. |
 | 2026-07-19 | DigiMine Configuration picker: Settings `digiMine.*`; proxy `POST /api/digimine/query`; Add device searches devices/equipment with pasted Bearer token (sessionStorage only); optional `equipmentId` on `POST /api/devices`. |
 | 2026-07-17 | Certificate folder is per-device (`devices[].certificateFolder` / SQLite); MQTT connect uses active device certs; Settings cert path binds to active device. |

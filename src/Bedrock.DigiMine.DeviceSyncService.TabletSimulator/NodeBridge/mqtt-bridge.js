@@ -192,6 +192,7 @@ function buildConfig(cli, stdin) {
     username: src.username || process.env.MQTT_BRIDGE_USERNAME || '',
     password: src.password || process.env.MQTT_BRIDGE_PASSWORD || '',
     topics,
+    cleanSession: src.cleanSession ?? src.clean ?? true,
   };
 }
 
@@ -222,7 +223,10 @@ function createClient(config, persistent) {
     rejectUnauthorized: config.rejectUnauthorized,
     reconnectPeriod: persistent ? 4000 : 0,
     connectTimeout: config.timeoutMs,
-    clean: true,
+    // Default true for one-shot validate/publish; listen passes config.cleanSession from simulator settings.
+    clean: config.cleanSession !== undefined && config.cleanSession !== null
+      ? !!config.cleanSession
+      : true,
   };
 
   if (config.username) {
@@ -230,7 +234,7 @@ function createClient(config, persistent) {
     options.password = config.password || '';
   }
 
-  logInfo(`Attempting connection to mqtts://${config.host}:${config.port} as ${config.clientId}...`);
+      logInfo(`Attempting connection to mqtts://${config.host}:${config.port} as ${config.clientId} (clean=${options.clean})...`);
   return mqtt.connect(options);
 }
 
@@ -347,25 +351,53 @@ function runListen(config) {
       emitEvent({ type: 'connected', clientId: config.clientId });
       logInfo('Listening for MQTT messages...');
 
-      config.topics.forEach((topic) => {
+      const topics = Array.isArray(config.topics) ? config.topics.filter(Boolean) : [];
+      if (topics.length === 0) {
+        emitEvent({ type: 'ready', subscribedCount: 0 });
+        logInfo('No topics to subscribe — listener ready');
+        return;
+      }
+
+      let remaining = topics.length;
+      let failures = 0;
+      topics.forEach((topic) => {
         client.subscribe(topic, { qos: 1 }, (err) => {
           if (err) {
+            failures += 1;
             emitEvent({ type: 'error', message: `Subscribe failed for ${topic}: ${err.message}` });
-            return;
+            logInfo(`Subscribe failed for ${topic}: ${err.message}`);
+          } else {
+            emitEvent({ type: 'subscribed', topic });
+            logInfo(`Subscribed: ${topic}`);
           }
-          emitEvent({ type: 'subscribed', topic });
-          logInfo(`Subscribed: ${topic}`);
+
+          remaining -= 1;
+          if (remaining === 0) {
+            emitEvent({
+              type: 'ready',
+              subscribedCount: topics.length - failures,
+              failedCount: failures,
+            });
+            logInfo(
+              failures > 0
+                ? `Listener ready with ${failures} subscribe failure(s)`
+                : `Listener ready — subscribed to ${topics.length} topic filter(s)`
+            );
+          }
         });
       });
     });
 
     client.on('message', (topic, payload, packet) => {
+      const size = payload ? payload.length : 0;
+      logInfo(`MQTT message received: ${topic} (${size} bytes, retain=${!!packet.retain})`);
       emitEvent({
         type: 'message',
         topic,
         payloadBase64: payload.toString('base64'),
         retain: !!packet.retain,
         receivedAt: new Date().toISOString(),
+        payloadLength: size,
       });
     });
 

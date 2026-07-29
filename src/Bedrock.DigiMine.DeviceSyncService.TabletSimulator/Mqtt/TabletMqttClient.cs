@@ -12,23 +12,35 @@ namespace Bedrock.DigiMine.DeviceSyncService.TabletSimulator.Mqtt;
 
 public sealed class TabletMqttClient : IAsyncDisposable
 {
+    public static readonly TimeSpan DefaultAutoDisposeAfter = TimeSpan.FromHours(1);
+
     private readonly SimulatorConfig _config;
     private readonly InboundMessageStore _inboundStore;
+    private readonly MqttActivityLog _activityLog;
     private readonly IMqttClient _client;
     private readonly NodeMqttBridgeService _nodeBridge = new();
     private long _inboundSequence;
     private readonly object _connectLock = new();
+    private readonly object _disposeTimerLock = new();
     private MqttEnvironment _activeEnvironment;
     private bool _nodeBridgeConnected;
     private NodeMqttListenerSession? _nodeListener;
-    private const int MaxInboundMessages = 500;
+    private DateTimeOffset? _connectedAt;
+    private bool _autoDisposeEnabled = true;
+    private TimeSpan _autoDisposeAfter = DefaultAutoDisposeAfter;
+    private DateTimeOffset? _autoDisposeAt;
+    private CancellationTokenSource? _autoDisposeCts;
+    private int _autoDisposeGeneration;
+    private const int MaxInboundMessages = 2000;
 
-    public TabletMqttClient(SimulatorConfig config, InboundMessageStore inboundStore)
+    public TabletMqttClient(SimulatorConfig config, InboundMessageStore inboundStore, MqttActivityLog activityLog)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(inboundStore);
+        ArgumentNullException.ThrowIfNull(activityLog);
         _config = config;
         _inboundStore = inboundStore;
+        _activityLog = activityLog;
         _inboundSequence = inboundStore.GetMaxSequence();
         _activeEnvironment = config.PrepareEnvironmentForDevice(config.GetActiveEnvironment());
         _client = new MqttFactory().CreateMqttClient();
@@ -37,11 +49,17 @@ public sealed class TabletMqttClient : IAsyncDisposable
 
     public bool EchoToConsole { get; set; }
     public event EventHandler<TabletInboundMessageEventArgs>? InboundReceived;
+    public event EventHandler? SessionChanged;
     public IReadOnlyList<string> ActiveSubscriptions { get; private set; } = [];
     public IReadOnlyCollection<TabletInboundMessage> RecentInbound => _inboundStore.GetRecent(MaxInboundMessages);
     public string ActiveEnvironmentName => _activeEnvironment.Name;
     public bool IsConnected => _nodeBridgeConnected || _client.IsConnected;
     public bool UsesNodeBridge => _nodeBridgeConnected;
+    public DateTimeOffset? ConnectedAt => _connectedAt;
+    public bool AutoDisposeEnabled => _autoDisposeEnabled;
+    public TimeSpan AutoDisposeAfter => _autoDisposeAfter;
+    public DateTimeOffset? AutoDisposeAt => _autoDisposeAt;
+    public MqttActivityLog ActivityLog => _activityLog;
 
     public async Task ConnectAndSubscribeAsync(CancellationToken cancellationToken = default)
     {
@@ -50,8 +68,21 @@ public sealed class TabletMqttClient : IAsyncDisposable
             _activeEnvironment = _config.PrepareEnvironmentForDevice(_config.GetActiveEnvironment());
         }
 
-        await ConnectInternalAsync(cancellationToken).ConfigureAwait(false);
-        await SubscribeInternalAsync(cancellationToken).ConfigureAwait(false);
+        var log = new ConnectionAttemptLog();
+        try
+        {
+            await ConnectInternalAsync(cancellationToken, log).ConfigureAwait(false);
+            await SubscribeInternalAsync(cancellationToken, log).ConfigureAwait(false);
+            MarkConnected(log);
+        }
+        catch (Exception ex)
+        {
+            MirrorLog(log);
+            _activityLog.Error($"Startup connect failed: {ex.Message}", _config.Device.DeviceId);
+            ClearConnectedState();
+            NotifySessionChanged();
+            throw;
+        }
     }
 
     public async Task ReconnectAsync(
@@ -68,30 +99,107 @@ public sealed class TabletMqttClient : IAsyncDisposable
             _activeEnvironment = _config.PrepareEnvironmentForDevice(env);
         }
 
+        log ??= new ConnectionAttemptLog();
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(MqttConnectionProbe.DefaultTimeout);
 
         try
         {
+            CancelAutoDisposeTimer();
             _nodeBridgeConnected = false;
             await UnsubscribeActiveAsync(timeoutCts.Token).ConfigureAwait(false);
             await StopNodeListenerAsync().ConfigureAwait(false);
             ActiveSubscriptions = [];
             if (_client.IsConnected)
             {
-                log?.Info("Disconnecting current session...");
+                log.Info("Disconnecting current session...");
                 await _client.DisconnectAsync(cancellationToken: timeoutCts.Token).ConfigureAwait(false);
             }
 
             await ConnectInternalAsync(timeoutCts.Token, log).ConfigureAwait(false);
             await SubscribeInternalAsync(timeoutCts.Token, log).ConfigureAwait(false);
+            MarkConnected(log);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            log?.Error($"Connection timed out after {MqttConnectionProbe.DefaultTimeout.TotalSeconds:0} seconds");
+            log.Error($"Connection timed out after {MqttConnectionProbe.DefaultTimeout.TotalSeconds:0} seconds");
+            MirrorLog(log);
+            ClearConnectedState();
+            NotifySessionChanged();
             throw new InvalidOperationException(
                 $"Connection timed out after {MqttConnectionProbe.DefaultTimeout.TotalSeconds:0} seconds");
         }
+        catch (Exception ex)
+        {
+            MirrorLog(log);
+            _activityLog.Error($"Connect failed: {ex.Message}", _config.Device.DeviceId);
+            ClearConnectedState();
+            NotifySessionChanged();
+            throw;
+        }
+    }
+
+    public MqttSessionSnapshot GetSessionSnapshot()
+    {
+        MqttEnvironment env;
+        lock (_connectLock)
+        {
+            env = _activeEnvironment;
+        }
+
+        env.NormalizeHost();
+        var entry = _config.FindDevice(_config.Device.DeviceId);
+        return new MqttSessionSnapshot(
+            _config.Device.DeviceId,
+            string.IsNullOrWhiteSpace(entry?.Name) ? null : entry!.Name,
+            _config.Device.EquipmentId,
+            env.Name,
+            env.GetBrokerUrl(),
+            IsConnected,
+            UsesNodeBridge,
+            _connectedAt,
+            _autoDisposeEnabled,
+            (int)Math.Round(_autoDisposeAfter.TotalMinutes),
+            IsConnected ? _autoDisposeAt : null,
+            ActiveSubscriptions,
+            _nodeListener?.SubscriptionsReady ?? (!UsesNodeBridge && IsConnected && ActiveSubscriptions.Count > 0),
+            _nodeListener?.ConfirmedSubscriptions ?? ActiveSubscriptions);
+    }
+
+    public void ConfigureAutoDispose(bool enabled, int? minutes = null)
+    {
+        _autoDisposeEnabled = enabled;
+        if (minutes is > 0)
+        {
+            _autoDisposeAfter = TimeSpan.FromMinutes(minutes.Value);
+        }
+
+        _activityLog.Info(
+            enabled
+                ? $"Auto-dispose enabled ({_autoDisposeAfter.TotalMinutes:0} min)"
+                : "Auto-dispose disabled",
+            _config.Device.DeviceId);
+
+        if (IsConnected && enabled)
+        {
+            ScheduleAutoDispose();
+        }
+        else
+        {
+            CancelAutoDisposeTimer();
+            if (!enabled)
+            {
+                _autoDisposeAt = null;
+            }
+        }
+
+        NotifySessionChanged();
+    }
+
+    public async Task DisconnectAllAsync(string reason = "manual disconnect-all", CancellationToken cancellationToken = default)
+    {
+        _activityLog.Info($"Closing MQTT session: {reason}", _config.Device.DeviceId);
+        await DisconnectAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task PublishAsync(string uplinkTopic, byte[] payload, bool retain = false, CancellationToken cancellationToken = default)
@@ -206,6 +314,8 @@ public sealed class TabletMqttClient : IAsyncDisposable
 
     public async Task DisconnectAsync(CancellationToken cancellationToken = default)
     {
+        CancelAutoDisposeTimer();
+        var wasConnected = IsConnected;
         await UnsubscribeActiveAsync(cancellationToken).ConfigureAwait(false);
         await StopNodeListenerAsync().ConfigureAwait(false);
         _nodeBridgeConnected = false;
@@ -214,13 +324,126 @@ public sealed class TabletMqttClient : IAsyncDisposable
         {
             await _client.DisconnectAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         }
+
+        ClearConnectedState();
+        if (wasConnected)
+        {
+            _activityLog.Info("MQTT disconnected", _config.Device.DeviceId);
+        }
+
+        NotifySessionChanged();
     }
 
     public async ValueTask DisposeAsync()
     {
+        CancelAutoDisposeTimer();
         await DisconnectAsync().ConfigureAwait(false);
         _client.Dispose();
     }
+
+    private void MarkConnected(ConnectionAttemptLog log)
+    {
+        MirrorLog(log);
+        _connectedAt = DateTimeOffset.UtcNow;
+        _activityLog.Info(
+            $"MQTT connected to {_activeEnvironment.GetBrokerUrl()}"
+            + (UsesNodeBridge ? " (Node bridge)" : string.Empty),
+            _config.Device.DeviceId);
+        if (_autoDisposeEnabled)
+        {
+            ScheduleAutoDispose();
+        }
+        else
+        {
+            _autoDisposeAt = null;
+        }
+
+        NotifySessionChanged();
+    }
+
+    private void MirrorLog(ConnectionAttemptLog log)
+    {
+        foreach (var entry in log.Entries)
+        {
+            var level = entry.Contains("ERROR:", StringComparison.OrdinalIgnoreCase) ? "error" : "info";
+            _activityLog.Add(level, entry, _config.Device.DeviceId);
+        }
+    }
+
+    private void ClearConnectedState()
+    {
+        _connectedAt = null;
+        _autoDisposeAt = null;
+    }
+
+    private void ScheduleAutoDispose()
+    {
+        CancelAutoDisposeTimer();
+        if (!_autoDisposeEnabled || _autoDisposeAfter <= TimeSpan.Zero)
+        {
+            _autoDisposeAt = null;
+            return;
+        }
+
+        _autoDisposeAt = DateTimeOffset.UtcNow.Add(_autoDisposeAfter);
+        var generation = Interlocked.Increment(ref _autoDisposeGeneration);
+        var cts = new CancellationTokenSource();
+        lock (_disposeTimerLock)
+        {
+            _autoDisposeCts = cts;
+        }
+
+        _activityLog.Info(
+            $"Auto-dispose scheduled at {_autoDisposeAt:HH:mm:ss} UTC ({_autoDisposeAfter.TotalMinutes:0} min)",
+            _config.Device.DeviceId);
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(_autoDisposeAfter, cts.Token).ConfigureAwait(false);
+                if (generation != Volatile.Read(ref _autoDisposeGeneration))
+                {
+                    return;
+                }
+
+                await DisconnectAllAsync(
+                    $"auto-dispose after {_autoDisposeAfter.TotalMinutes:0} minutes",
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+            catch (Exception ex)
+            {
+                _activityLog.Error($"Auto-dispose failed: {ex.Message}", _config.Device.DeviceId);
+            }
+        });
+    }
+
+    private void CancelAutoDisposeTimer()
+    {
+        lock (_disposeTimerLock)
+        {
+            if (_autoDisposeCts is null)
+            {
+                return;
+            }
+
+            try
+            {
+                _autoDisposeCts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            _autoDisposeCts.Dispose();
+            _autoDisposeCts = null;
+        }
+    }
+
+    private void NotifySessionChanged() => SessionChanged?.Invoke(this, EventArgs.Empty);
 
     /// <summary>
     /// Best-effort unsubscribe of current downlink filters so the broker does not keep a stale session.
@@ -296,17 +519,30 @@ public sealed class TabletMqttClient : IAsyncDisposable
 
         var filters = TabletTopicCatalog.GetDownlinkSubscriptionFilters(_config.Device.DeviceId);
         var listenerClientId = $"{clientId}-listen";
-        log?.Info($"Starting Node listener as {listenerClientId} for {filters.Count} topic filter(s)...");
+        log?.Info(
+            $"Starting Node listener as {listenerClientId} for {filters.Count} topic filter(s): {string.Join(", ", filters)}");
 
-        var listener = await _nodeBridge.StartListenerAsync(env, listenerClientId, filters, cancellationToken: cancellationToken)
+        var listener = await _nodeBridge.StartListenerAsync(
+                env,
+                listenerClientId,
+                filters,
+                onMessage: OnNodeListenerMessage,
+                onLog: (_, line) =>
+                {
+                    log?.Info(line);
+                    // Also keep persistent global activity log after connect attempt ends.
+                    _activityLog.Info(line, _config.Device.DeviceId);
+                },
+                cancellationToken: cancellationToken)
             .ConfigureAwait(false);
-        listener.MessageReceived += OnNodeListenerMessage;
-        listener.LogReceived += (_, line) => log?.Info(line);
 
         _nodeListener = listener;
         _nodeBridgeConnected = true;
         ActiveSubscriptions = filters;
-        log?.Info("Connected via Node bridge — listening for downlink messages");
+        log?.Info(
+            listener.SubscriptionsReady
+                ? $"Connected via Node bridge — subscriptions ready: {string.Join(", ", listener.ConfirmedSubscriptions.Count > 0 ? listener.ConfirmedSubscriptions : filters)}"
+                : $"Connected via Node bridge — listening for downlink on: {string.Join(", ", filters)}");
     }
 
     private void OnNodeListenerMessage(object? sender, TabletInboundMessageEventArgs e) =>
@@ -328,9 +564,20 @@ public sealed class TabletMqttClient : IAsyncDisposable
     {
         if (_nodeBridgeConnected)
         {
-            foreach (var filter in ActiveSubscriptions)
+            var confirmed = _nodeListener?.ConfirmedSubscriptions ?? [];
+            if (confirmed.Count > 0)
             {
-                log?.Info($"Subscribed (Node bridge): {filter}");
+                foreach (var filter in confirmed)
+                {
+                    log?.Info($"Broker confirmed subscribe: {filter}");
+                }
+            }
+            else
+            {
+                foreach (var filter in ActiveSubscriptions)
+                {
+                    log?.Info($"Subscribed (Node bridge, awaiting confirm): {filter}");
+                }
             }
 
             return;
@@ -377,6 +624,9 @@ public sealed class TabletMqttClient : IAsyncDisposable
     {
         var sequenced = inbound with { Sequence = Interlocked.Increment(ref _inboundSequence) };
         _inboundStore.Save(sequenced);
+        _activityLog.Info(
+            $"Inbound MQTT #{sequenced.Sequence}: {sequenced.Topic} ({sequenced.PayloadLength} bytes, retain={sequenced.Retained})",
+            _config.Device.DeviceId);
         InboundReceived?.Invoke(this, new TabletInboundMessageEventArgs(sequenced));
     }
 
@@ -396,10 +646,12 @@ public sealed class TabletMqttClient : IAsyncDisposable
             var decodeInner = InnerPayloadSupport.SupportsInnerPayload(descriptor.MessageName);
             var result = MqttProtoDecoder.Decode(topic, payload, "mqtt");
             var fields = TryExtractPayloadFields(result, decodeInner);
+            var payloadJson = MqttProtoDecoder.FormatPayloadJson(result.Root, result.WireBytes, decodeInner);
             return new InboundDecodeResult(
                 MqttProtoDecoder.FormatOutput(result, decodeInner),
                 fields.EventType,
-                fields.EquipmentId);
+                fields.EquipmentId,
+                payloadJson);
         }
         catch (InvalidProtocolBufferException ex)
         {
@@ -409,6 +661,17 @@ public sealed class TabletMqttClient : IAsyncDisposable
         {
             return new InboundDecodeResult($"Decode failed: {ex.Message}", null, null);
         }
+    }
+
+    internal static EncodePreviewResult EncodeJsonPreview(string topic, string json)
+    {
+        var (_, normalizedJson, _, _) = MqttProtoEncoder.ResolveJsonInput(json);
+        var encoded = MqttProtoEncoder.Encode(topic.Trim(), normalizedJson);
+        return new EncodePreviewResult(
+            encoded.Topic,
+            encoded.MessageType,
+            Convert.ToHexString(encoded.WireBytes.Span),
+            encoded.PayloadByteLength);
     }
 
     private static (string? EventType, string? EquipmentId) TryExtractPayloadFields(
@@ -445,7 +708,17 @@ public sealed class TabletMqttClient : IAsyncDisposable
     }
 }
 
-internal sealed record InboundDecodeResult(string Summary, string? EventType, string? EquipmentId = null);
+internal sealed record InboundDecodeResult(
+    string Summary,
+    string? EventType,
+    string? EquipmentId = null,
+    string? PayloadJson = null);
+
+internal sealed record EncodePreviewResult(
+    string Topic,
+    string MessageType,
+    string PayloadHex,
+    int PayloadByteLength);
 
 public enum UplinkPreset
 {

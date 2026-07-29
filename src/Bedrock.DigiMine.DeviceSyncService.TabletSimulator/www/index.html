@@ -38,29 +38,48 @@
   </div>
   <button type="button" class="btn btn-primary" id="connect">Connect</button>
   <button type="button" class="btn btn-danger" id="disconnect">Disconnect</button>
+  <button type="button" class="btn btn-danger" id="disconnectAll">Close all MQTT</button>
   <span id="connStatus" class="badge">disconnected</span>
 </div>
-<p class="muted">Closing the browser does not drop MQTT subscriptions — the simulator process keeps listening. Use Disconnect or stop the app (Ctrl+C) to unsubscribe cleanly.</p>
+<div class="row mqtt-session-bar">
+  <label class="inline-check"><input type="checkbox" id="autoDisposeEnabled" checked> Auto-close MQTT after</label>
+  <input type="number" id="autoDisposeMinutes" min="1" max="1440" value="60" style="min-width:80px;width:80px;">
+  <span class="muted">minutes</span>
+  <button type="button" class="btn" id="applyAutoDispose">Apply</button>
+  <span id="autoDisposeStatus" class="muted"></span>
+</div>
+<p class="muted">Closing the browser does not drop MQTT subscriptions — the simulator process keeps listening. Use Disconnect / Close all MQTT, or wait for auto-close (default 1 hour).</p>
 
 <p id="status" class="muted">loading...</p>
 <p id="subscriptionStatus" class="muted"></p>
 <details id="connectLogPanel" class="card" style="display:none;">
-  <summary>Connection log</summary>
+  <summary>Last connection attempt</summary>
   <pre id="connectLog"></pre>
 </details>
 
+<details class="card" open>
+  <summary>Global MQTT log</summary>
+  <div class="row inbound-toolbar" style="margin-top:8px;">
+    <button type="button" class="btn" id="clearMqttLog">Clear log</button>
+    <span id="mqttLogCount" class="muted"></span>
+  </div>
+  <pre id="mqttGlobalLog" class="mqtt-log">No MQTT events yet.</pre>
+</details>
+
 <h2>Inbound (service → device)</h2>
+<p class="muted">Shows downlink messages received from the broker (e.g. DSS replies after Sync FULL). Your uplink publishes do not appear here.</p>
 <div class="row inbound-toolbar">
   <div class="form-group" style="flex:1; min-width:240px; margin-bottom:0;">
     <label for="inboundSearch">Search</label>
     <input type="text" id="inboundSearch" placeholder="Filter by topic, event type, equipment, summary, hex, time...">
   </div>
+  <button type="button" class="btn" id="refreshInbound">Refresh</button>
   <button type="button" class="btn" id="exportInbound">Export JSON</button>
   <button type="button" class="btn" id="clear">Clear</button>
 </div>
 <p id="inboundCount" class="muted"></p>
 
-<div class="table-scroll inbound-table-scroll">
+<div class="table-scroll inbound-table-scroll inbound-table-scroll-tall">
   <table>
     <thead>
       <tr><th>Time (IST)</th><th>Topic</th><th>Event type</th><th>Equipment</th><th>Bytes</th><th>Retain</th><th>Actions</th></tr>
@@ -87,12 +106,16 @@
 <h2>Publish (device → service)</h2>
 <div class="card">
 <p class="form-group"><label>Topic<br><input type="text" id="topic" size="80"></label></p>
+<p class="form-group"><label>Payload JSON<br>
+<textarea id="payloadJson" class="payload-json" rows="12" spellcheck="false" placeholder="Edit SyncRequest JSON — auto-encodes to hex below"></textarea>
+</label></p>
 <p class="form-group"><label>Payload (hex or JSON)<br><input type="text" id="payload" size="80" placeholder="hex… or paste protobuf JSON to encode"></label></p>
-<p class="muted">JSON is encoded with ProtoDecoder (<code>MqttProtoEncoder</code>) using the topic above. Hex / file paths use the existing raw path.</p>
+<p class="muted">Edit JSON above to auto-sync hex via ProtoDecoder (<code>MqttProtoEncoder</code>). <strong>Sync FULL</strong> loads the default SyncRequest for the active device/equipment and publishes it. Inbound below only lists <em>service → device</em> replies (not the uplink you just sent).</p>
+<p id="payloadSyncStatus" class="muted"></p>
 <p><label><input type="checkbox" id="retain"> retain</label></p>
 <p>
 <button type="button" class="btn btn-primary" id="publish">Publish</button>
-<button type="button" class="btn" data-preset="sync">Sync FULL</button>
+<button type="button" class="btn" id="loadSyncFull">Sync FULL</button>
 <button type="button" class="btn" data-preset="heartbeat">Heartbeat</button>
 </p>
 <p id="publishStatus" class="muted"></p>
@@ -109,8 +132,15 @@ const status = document.getElementById('status');
 const subscriptionStatus = document.getElementById('subscriptionStatus');
 const topic = document.getElementById('topic');
 const payload = document.getElementById('payload');
+const payloadJson = document.getElementById('payloadJson');
+const payloadSyncStatus = document.getElementById('payloadSyncStatus');
 const retain = document.getElementById('retain');
 const publishStatus = document.getElementById('publishStatus');
+let payloadSyncTimer = null;
+let payloadSyncToken = 0;
+let syncingFromJson = false;
+let syncingFromHex = false;
+let lastSyncFullDeviceId = '';
 const viewDialog = document.getElementById('viewDialog');
 const viewTitle = document.getElementById('viewTitle');
 const viewTopic = document.getElementById('viewTopic');
@@ -119,14 +149,27 @@ const viewPosition = document.getElementById('viewPosition');
 const viewContent = document.getElementById('viewContent');
 const viewPrev = document.getElementById('viewPrev');
 const viewNext = document.getElementById('viewNext');
+const mqttGlobalLog = document.getElementById('mqttGlobalLog');
+const mqttLogCount = document.getElementById('mqttLogCount');
+const autoDisposeEnabled = document.getElementById('autoDisposeEnabled');
+const autoDisposeMinutes = document.getElementById('autoDisposeMinutes');
+const autoDisposeStatus = document.getElementById('autoDisposeStatus');
 const messages = [];
 const seenInboundSequences = new Set();
+const mqttLogLines = [];
 let msgId = 0;
 let searchQuery = '';
 let viewNav = { entries: [], index: -1, mode: 'log' };
+let persistTimer = null;
+let renderScheduled = false;
+let pendingLiveRows = [];
 
 const STORAGE_KEY = 'tabletSimulator.inboundMessages';
-const MAX_STORED_MESSAGES = 500;
+const MAX_STORED_MESSAGES = 2000;
+const VISIBLE_ROW_LIMIT = 500;
+const MAX_MQTT_LOG_LINES = 400;
+let inboundBurstTimer = null;
+let inboundBurstUntil = 0;
 
 const istFormatter = new Intl.DateTimeFormat('en-IN', {
   timeZone: 'Asia/Kolkata',
@@ -148,14 +191,18 @@ function formatTimeIst(iso) {
   return istFormatter.format(new Date(iso)).replace(/\//g, '-');
 }
 
+function normalizeMsg(msg) {
+  if (!msg.eventType) msg.eventType = extractDecodedJsonProperty(msg, 'eventType') || '';
+  if (!msg.equipmentId) msg.equipmentId = extractDecodedJsonProperty(msg, 'equipmentId') || '';
+  return msg;
+}
+
 function extractEventType(msg) {
-  if (msg.eventType) return msg.eventType;
-  return extractDecodedJsonProperty(msg, 'eventType');
+  return msg.eventType || '';
 }
 
 function extractEquipmentId(msg) {
-  if (msg.equipmentId) return msg.equipmentId;
-  return extractDecodedJsonProperty(msg, 'equipmentId');
+  return msg.equipmentId || '';
 }
 
 function extractDecodedJsonProperty(msg, propertyName) {
@@ -216,11 +263,14 @@ function getFilteredEntries() {
   return result;
 }
 
-function updateInboundCount(shown, total) {
+function updateInboundCount(shown, total, capped) {
   const base = searchQuery
     ? `Showing ${shown} of ${total} message(s)`
     : `${total} message(s)`;
-  inboundCount.textContent = total > 0 ? `${base} · saved in browser + SQLite` : base;
+  const capNote = capped ? ` · showing latest ${VISIBLE_ROW_LIMIT}` : '';
+  inboundCount.textContent = total > 0
+    ? `${base}${capNote} · SQLite + light browser cache`
+    : base;
 }
 
 function trimMessagesForStorage() {
@@ -233,32 +283,12 @@ function trimMessagesForStorage() {
   }
 }
 
-function persistInbound() {
-  try {
-    trimMessagesForStorage();
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      nextId: msgId,
-      entries: messages.map(entry => ({ id: entry.id, msg: entry.msg })),
-    }));
-  } catch (err) {
-    console.warn('Failed to save inbound messages to localStorage:', err);
-    if (messages.length > 100) {
-      messages.splice(0, messages.length - 100);
-      seenInboundSequences.clear();
-      for (const entry of messages) {
-        const key = inboundDedupeKey(entry.msg);
-        if (key != null) seenInboundSequences.add(key);
-      }
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify({
-          nextId: msgId,
-          entries: messages.map(entry => ({ id: entry.id, msg: entry.msg })),
-        }));
-      } catch (retryErr) {
-        console.warn('Inbound localStorage save retry failed:', retryErr);
-      }
-    }
-  }
+function schedulePersist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    persistInbound();
+  }, 2000);
 }
 
 function loadInboundFromStorage() {
@@ -273,6 +303,7 @@ function loadInboundFromStorage() {
     seenInboundSequences.clear();
     for (const entry of data.entries) {
       if (!entry?.msg?.topic) continue;
+      normalizeMsg(entry.msg);
       messages.push({ id: entry.id, msg: entry.msg });
       const key = inboundDedupeKey(entry.msg);
       if (key != null) seenInboundSequences.add(key);
@@ -280,7 +311,6 @@ function loadInboundFromStorage() {
 
     const maxId = messages.reduce((max, entry) => Math.max(max, entry.id), 0);
     msgId = Math.max(data.nextId || 0, maxId);
-    renderInboundTable();
   } catch (err) {
     console.warn('Failed to load inbound messages from localStorage:', err);
   }
@@ -290,83 +320,177 @@ function clearInboundStorage() {
   localStorage.removeItem(STORAGE_KEY);
 }
 
+function buildInboundRow(entry) {
+  const tr = document.createElement('tr');
+  tr.className = 'inbound-row';
+
+  const tdTime = document.createElement('td');
+  tdTime.textContent = formatTimeIst(entry.msg.receivedAt);
+  tr.appendChild(tdTime);
+
+  const tdTopic = document.createElement('td');
+  tdTopic.textContent = entry.msg.topic;
+  tr.appendChild(tdTopic);
+
+  const tdEventType = document.createElement('td');
+  const eventType = extractEventType(entry.msg);
+  tdEventType.textContent = eventType || '—';
+  if (eventType) tdEventType.title = eventType;
+  tr.appendChild(tdEventType);
+
+  const tdEquipment = document.createElement('td');
+  const equipmentId = extractEquipmentId(entry.msg);
+  tdEquipment.textContent = equipmentId || '—';
+  if (equipmentId) tdEquipment.title = equipmentId;
+  tr.appendChild(tdEquipment);
+
+  const tdBytes = document.createElement('td');
+  tdBytes.textContent = String(entry.msg.payloadLength);
+  tr.appendChild(tdBytes);
+
+  const tdRetain = document.createElement('td');
+  tdRetain.textContent = String(entry.msg.retained);
+  tr.appendChild(tdRetain);
+
+  const tdActions = document.createElement('td');
+  const logBtn = document.createElement('button');
+  logBtn.type = 'button';
+  logBtn.className = 'btn';
+  logBtn.dataset.action = 'log';
+  logBtn.dataset.id = String(entry.id);
+  logBtn.textContent = 'View log';
+  const hexBtn = document.createElement('button');
+  hexBtn.type = 'button';
+  hexBtn.className = 'btn';
+  hexBtn.dataset.action = 'hex';
+  hexBtn.dataset.id = String(entry.id);
+  hexBtn.textContent = 'View encoded';
+  tdActions.append(logBtn, document.createTextNode(' '), hexBtn);
+  tr.appendChild(tdActions);
+  return tr;
+}
+
 function renderInboundTable() {
   const query = searchQuery.trim().toLowerCase();
-  inboundBody.innerHTML = '';
+  const frag = document.createDocumentFragment();
   let shown = 0;
+  let capped = false;
   for (let i = messages.length - 1; i >= 0; i--) {
     const entry = messages[i];
     if (!matchesSearch(entry.msg, query)) continue;
+    if (shown >= VISIBLE_ROW_LIMIT) {
+      capped = true;
+      break;
+    }
     shown++;
-
-    const tr = document.createElement('tr');
-    tr.className = 'inbound-row';
-    tr.title = messageJson(entry.msg);
-
-    const tdTime = document.createElement('td');
-    tdTime.textContent = formatTimeIst(entry.msg.receivedAt);
-    tr.appendChild(tdTime);
-
-    const tdTopic = document.createElement('td');
-    tdTopic.textContent = entry.msg.topic;
-    tr.appendChild(tdTopic);
-
-    const tdEventType = document.createElement('td');
-    const eventType = extractEventType(entry.msg);
-    tdEventType.textContent = eventType || '—';
-    if (eventType) tdEventType.title = eventType;
-    tr.appendChild(tdEventType);
-
-    const tdEquipment = document.createElement('td');
-    const equipmentId = extractEquipmentId(entry.msg);
-    tdEquipment.textContent = equipmentId || '—';
-    if (equipmentId) tdEquipment.title = equipmentId;
-    tr.appendChild(tdEquipment);
-
-    const tdBytes = document.createElement('td');
-    tdBytes.textContent = String(entry.msg.payloadLength);
-    tr.appendChild(tdBytes);
-
-    const tdRetain = document.createElement('td');
-    tdRetain.textContent = String(entry.msg.retained);
-    tr.appendChild(tdRetain);
-
-    const tdActions = document.createElement('td');
-    const logBtn = document.createElement('button');
-    logBtn.type = 'button';
-    logBtn.className = 'btn';
-    logBtn.dataset.action = 'log';
-    logBtn.dataset.id = String(entry.id);
-    logBtn.textContent = 'View log';
-    const hexBtn = document.createElement('button');
-    hexBtn.type = 'button';
-    hexBtn.className = 'btn';
-    hexBtn.dataset.action = 'hex';
-    hexBtn.dataset.id = String(entry.id);
-    hexBtn.textContent = 'View encoded';
-    tdActions.append(logBtn, document.createTextNode(' '), hexBtn);
-    tr.appendChild(tdActions);
-
-    inboundBody.appendChild(tr);
+    frag.appendChild(buildInboundRow(entry));
   }
-  updateInboundCount(shown, messages.length);
+  inboundBody.replaceChildren(frag);
+  updateInboundCount(shown, messages.length, capped);
 }
 
-function addInboundRow(msg, { skipDedupe = false, skipPersist = false } = {}) {
+function scheduleRenderInbound() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    pendingLiveRows.length = 0;
+    // Always full re-render — incremental prepend raced with burst /api/inbound polls
+    // and could leave the table stuck on a single row.
+    renderInboundTable();
+  });
+}
+
+function addInboundRow(msg, { skipDedupe = false, skipPersist = false, batch = false } = {}) {
+  normalizeMsg(msg);
   const key = inboundDedupeKey(msg);
-  if (!skipDedupe && key != null && seenInboundSequences.has(key)) return;
+  if (!skipDedupe && key != null && seenInboundSequences.has(key)) return false;
   if (key != null) seenInboundSequences.add(key);
-  messages.push({ id: ++msgId, msg });
-  renderInboundTable();
-  if (!skipPersist) {
-    persistInbound();
+  const entry = { id: ++msgId, msg };
+  messages.push(entry);
+  if (!batch) {
+    pendingLiveRows.push(entry);
+    scheduleRenderInbound();
   }
+  if (!skipPersist) schedulePersist();
+  return true;
+}
+
+function lightMsgForStorage(msg) {
+  const summary = msg.decodedSummary || '';
+  return {
+    sequence: msg.sequence,
+    receivedAt: msg.receivedAt,
+    topic: msg.topic,
+    payloadLength: msg.payloadLength,
+    retained: msg.retained,
+    // Keep a short summary only — full decode stays in SQLite; View log re-fetches.
+    decodedSummary: summary.length > 800
+      ? summary.slice(0, 800) + '\n…(truncated in browser cache)'
+      : summary,
+    eventType: msg.eventType || null,
+    equipmentId: msg.equipmentId || null,
+  };
+}
+
+function persistInbound() {
+  try {
+    trimMessagesForStorage();
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      nextId: msgId,
+      entries: messages.map(entry => ({
+        id: entry.id,
+        msg: lightMsgForStorage(entry.msg),
+      })),
+    }));
+  } catch (err) {
+    console.warn('Failed to save inbound messages to localStorage:', err);
+    // Shrink until it fits (or give up).
+    let keep = Math.min(messages.length, 200);
+    while (keep > 10) {
+      const slice = messages.slice(messages.length - keep);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          nextId: msgId,
+          entries: slice.map(entry => ({
+            id: entry.id,
+            msg: lightMsgForStorage(entry.msg),
+          })),
+        }));
+        break;
+      } catch {
+        keep = Math.floor(keep / 2);
+      }
+    }
+  }
+}
+
+async function ensureInboundDetails(entry) {
+  const needsHex = !(entry.msg.payloadHex || '').trim();
+  const needsSummary = !(entry.msg.decodedSummary || '').trim()
+    || String(entry.msg.decodedSummary).includes('(truncated for live SSE');
+  if (!needsHex && !needsSummary) return entry;
+  const seq = entry.msg.sequence;
+  if (seq == null || seq <= 0) return entry;
+  try {
+    const r = await fetch(`/api/inbound/${seq}`);
+    if (!r.ok) return entry;
+    const full = await r.json();
+    if (full.payloadHex) entry.msg.payloadHex = full.payloadHex;
+    if (full.decodedSummary) entry.msg.decodedSummary = full.decodedSummary;
+    if (full.eventType) entry.msg.eventType = full.eventType;
+    if (full.equipmentId) entry.msg.equipmentId = full.equipmentId;
+  } catch (err) {
+    console.warn('Failed to load full inbound message:', err);
+  }
+  return entry;
 }
 
 async function renderViewDialog() {
   const { entries, index, mode } = viewNav;
-  const entry = entries[index];
+  let entry = entries[index];
   if (!entry) return;
+  entry = await ensureInboundDetails(entry);
 
   viewTitle.textContent = mode === 'log' ? 'Decoded log' : 'Encoded payload';
   viewTopic.textContent = entry.msg.topic;
@@ -376,14 +500,13 @@ async function renderViewDialog() {
   viewNext.disabled = index >= entries.length - 1;
 
   if (mode !== 'log') {
-    viewContent.textContent = entry.msg.payloadHex || '(empty)';
+    viewContent.textContent = entry.msg.payloadHex || '(empty — reload from server if missing)';
     return;
   }
 
-  // Re-decode from hex with current ProtoDecoder / Grpc.Shared (stored summary can be stale after lib upgrades).
   const hex = (entry.msg.payloadHex || '').trim();
-  const topic = entry.msg.topic || '';
-  if (!hex || !topic) {
+  const topicVal = entry.msg.topic || '';
+  if (!hex || !topicVal) {
     viewContent.textContent = entry.msg.decodedSummary || '(empty)';
     return;
   }
@@ -395,7 +518,7 @@ async function renderViewDialog() {
     const r = await fetch('/api/decode', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ topic, payloadHex: hex }),
+      body: JSON.stringify({ topic: topicVal, payloadHex: hex }),
     });
     const j = await r.json();
     if (viewNav.decodeToken !== requestToken) return;
@@ -410,8 +533,7 @@ async function renderViewDialog() {
       entry.msg.decodedSummary = j.decodedSummary;
       if (j.eventType) entry.msg.eventType = j.eventType;
       if (j.equipmentId) entry.msg.equipmentId = j.equipmentId;
-      persistInbound();
-      renderInboundTable();
+      schedulePersist();
     }
   } catch (e) {
     if (viewNav.decodeToken !== requestToken) return;
@@ -453,6 +575,7 @@ document.getElementById('clear').onclick = async () => {
   messages.length = 0;
   seenInboundSequences.clear();
   msgId = 0;
+  pendingLiveRows.length = 0;
   clearInboundStorage();
   renderInboundTable();
   try {
@@ -461,9 +584,28 @@ document.getElementById('clear').onclick = async () => {
     console.warn('Failed to clear server inbound history:', err);
   }
 };
+
+document.getElementById('refreshInbound').onclick = async () => {
+  const btn = document.getElementById('refreshInbound');
+  btn.disabled = true;
+  inboundCount.textContent = 'Refreshing inbound from server…';
+  try {
+    const result = await loadInboundHistory({ replace: true });
+    inboundCount.textContent = result.ok
+      ? `${result.total} message(s) loaded from server (SQLite) · cached locally`
+      : 'Refresh failed';
+  } catch (err) {
+    inboundCount.textContent = 'Refresh failed: ' + err.message;
+    console.warn('Inbound refresh failed:', err);
+  } finally {
+    btn.disabled = false;
+  }
+};
+let searchTimer = null;
 inboundSearch.oninput = () => {
   searchQuery = inboundSearch.value;
-  renderInboundTable();
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => renderInboundTable(), 120);
 };
 document.getElementById('exportInbound').onclick = () => {
   const query = searchQuery.trim().toLowerCase();
@@ -479,46 +621,55 @@ document.getElementById('exportInbound').onclick = () => {
   URL.revokeObjectURL(url);
 };
 
-async function syncInboundToServer() {
-  const payload = messages
-    .map(entry => entry.msg)
-    .filter(msg => msg?.topic && msg.sequence > 0);
-  if (!payload.length) return;
+async function loadInboundHistory({ replace = false } = {}) {
+  const r = await fetch('/api/inbound?limit=2000');
+  if (!r.ok) return { ok: false, added: 0, total: messages.length };
+  const j = await r.json();
+  const serverMessages = Array.isArray(j.messages) ? j.messages : [];
 
-  try {
-    const r = await fetch('/api/inbound', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: payload }),
-    });
-    if (!r.ok) {
-      console.warn('Inbound sync to server failed:', await r.text());
-      return;
-    }
-    const j = await r.json();
-    if (j.imported > 0) {
-      await loadInboundHistory();
-    }
-  } catch (err) {
-    console.warn('Inbound sync to server failed:', err);
+  if (replace) {
+    messages.length = 0;
+    seenInboundSequences.clear();
+    pendingLiveRows.length = 0;
   }
+
+  let added = 0;
+  for (const msg of serverMessages) {
+    if (addInboundRow(msg, { skipPersist: true, batch: true })) added += 1;
+  }
+  pendingLiveRows.length = 0;
+  schedulePersist();
+  renderInboundTable();
+  return { ok: true, added, total: messages.length, serverTotal: j.total ?? serverMessages.length };
 }
 
-async function loadInboundHistory() {
-  const r = await fetch('/api/inbound');
-  if (!r.ok) return;
-  const j = await r.json();
-  let added = false;
-  for (const msg of j.messages || []) {
-    const before = messages.length;
-    addInboundRow(msg, { skipPersist: true });
-    if (messages.length > before) added = true;
+function startInboundBurstWatch(durationMs = 20000) {
+  inboundBurstUntil = Date.now() + durationMs;
+  if (inboundBurstTimer) return;
+  inboundBurstTimer = setInterval(async () => {
+    if (Date.now() > inboundBurstUntil) {
+      clearInterval(inboundBurstTimer);
+      inboundBurstTimer = null;
+      return;
+    }
+    try {
+      await loadInboundHistory();
+    } catch (err) {
+      console.warn('Inbound burst refresh failed:', err);
+    }
+  }, 750);
+}
+
+function formatAutoDisposeStatus(s) {
+  if (!s.autoDisposeEnabled) {
+    autoDisposeStatus.textContent = 'Auto-close off';
+    return;
   }
-  if (added) {
-    persistInbound();
-  } else {
-    renderInboundTable();
+  if (s.connected && s.autoDisposeAt) {
+    autoDisposeStatus.textContent = `Auto-close at ${formatTimeIst(s.autoDisposeAt)} IST`;
+    return;
   }
+  autoDisposeStatus.textContent = `Auto-close after ${s.autoDisposeMinutes || 60} min when connected`;
 }
 
 function updateConnectionUi(s) {
@@ -535,26 +686,276 @@ function updateConnectionUi(s) {
   document.getElementById('deviceIdLabel').textContent = s.deviceId || '—';
   document.getElementById('equipmentIdLabel').textContent = s.equipmentId || '—';
   topic.value = s.defaultTopic || topic.value;
-  environment.innerHTML = (s.environments || []).map(n =>
-    `<option value="${n}" ${n === s.environment ? 'selected' : ''}>${n}</option>`).join('');
+  if (Array.isArray(s.environments)) {
+    environment.innerHTML = s.environments.map(n =>
+      `<option value="${n}" ${n === s.environment ? 'selected' : ''}>${n}</option>`).join('');
+  }
   connStatus.textContent = s.connected ? 'connected' : 'disconnected';
   connStatus.className = 'badge ' + (s.connected ? 'badge-ok' : 'badge-err');
   const bridge = s.usesNodeBridge ? ' | Node OpenSSL bridge' : '';
-  status.textContent = `broker=${s.broker} | env=${s.environment}${bridge}`;
-  if (s.connected && s.subscriptions && s.subscriptions.length) {
+  status.textContent = `broker=${s.broker || '—'} | env=${s.environment || '—'}${bridge}`;
+  if (typeof s.autoDisposeEnabled === 'boolean') {
+    autoDisposeEnabled.checked = s.autoDisposeEnabled;
+  }
+  if (s.autoDisposeMinutes) {
+    autoDisposeMinutes.value = String(s.autoDisposeMinutes);
+  }
+  formatAutoDisposeStatus(s);
+  if (s.connected) {
+    const confirmed = Array.isArray(s.confirmedSubscriptions) && s.confirmedSubscriptions.length
+      ? s.confirmedSubscriptions
+      : (s.subscriptions || []);
+    const ready = s.subscriptionsReady === true
+      ? 'READY'
+      : (s.subscriptionsReady === false ? 'NOT READY' : 'unknown');
     subscriptionStatus.textContent =
-      `Listening on: ${s.subscriptions.join(', ')} — inbound topics must match to/${s.deviceId}/...`;
-  } else if (s.connected) {
-    subscriptionStatus.textContent = 'Connected but no subscriptions active.';
+      `Subscriptions ${ready}: ${confirmed.join(', ') || '(none)'} — expect downlink on to/${s.deviceId}/# and config/#`;
   } else {
     subscriptionStatus.textContent = '';
   }
 }
 
+function applySessionEvent(session) {
+  updateConnectionUi({
+    deviceId: session.deviceId,
+    equipmentId: session.equipmentId,
+    name: session.name || '',
+    broker: session.broker,
+    environment: session.environment,
+    connected: session.connected,
+    usesNodeBridge: session.usesNodeBridge,
+    subscriptions: session.subscriptions || [],
+    subscriptionsReady: session.subscriptionsReady,
+    confirmedSubscriptions: session.confirmedSubscriptions || session.subscriptions || [],
+    autoDisposeEnabled: session.autoDisposeEnabled,
+    autoDisposeMinutes: session.autoDisposeMinutes,
+    autoDisposeAt: session.autoDisposeAt,
+    environments: Array.from(environment.options).map(o => o.value),
+    defaultTopic: topic.value,
+  });
+}
+
 async function loadStatus() {
   const s = await fetch('/api/status').then(r => r.json());
   updateConnectionUi(s);
+  const deviceId = s.deviceId || '';
+  if (!payloadJson.value.trim() || (deviceId && deviceId !== lastSyncFullDeviceId)) {
+    await loadSyncFullPreset({ silent: true });
+  }
 }
+
+function looksLikeHexPayload(text) {
+  const hex = text.replace(/\s+/g, '');
+  return hex.length >= 2 && hex.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(hex);
+}
+
+function looksLikeJsonPayload(text) {
+  const t = text.trim();
+  return t.startsWith('{') || t.startsWith('[') || t.includes('Decoded payload:');
+}
+
+async function loadSyncFullPreset(options = {}) {
+  const silent = !!options.silent;
+  const publishAfter = !!options.publish;
+  try {
+    if (!silent) publishStatus.textContent = publishAfter ? 'loading Sync FULL…' : 'loading Sync FULL…';
+    const r = await fetch('/api/presets/sync-full');
+    const j = await r.json();
+    if (!r.ok) {
+      if (!silent) publishStatus.textContent = j.error || 'failed to load Sync FULL';
+      payloadSyncStatus.textContent = j.error || 'preset failed';
+      return false;
+    }
+    syncingFromJson = true;
+    syncingFromHex = true;
+    if (j.topic) topic.value = j.topic;
+    payloadJson.value = j.json || '';
+    payload.value = j.payloadHex || '';
+    syncingFromJson = false;
+    syncingFromHex = false;
+    lastSyncFullDeviceId = j.deviceId || '';
+    payloadSyncStatus.textContent = j.messageType
+      ? `Synced FULL (${j.messageType}, ${(j.payloadHex || '').length / 2} bytes)`
+      : 'Synced FULL loaded';
+    if (!publishAfter) {
+      if (!silent) publishStatus.textContent = 'Sync FULL loaded — edit JSON if needed, then Publish';
+      return true;
+    }
+
+    publishStatus.textContent = 'publishing Sync FULL…';
+    const pub = await fetch('/api/publish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        topic: (j.topic || topic.value).trim(),
+        payload: (j.payloadHex || payload.value).trim(),
+        retain: retain.checked,
+      }),
+    });
+    const pubJson = await pub.json();
+    if (!pub.ok) {
+      publishStatus.textContent = pubJson.error || 'publish failed';
+      return false;
+    }
+    publishStatus.textContent =
+      'Sync FULL published — watching Inbound for service replies (uplink itself is not listed there)';
+    startInboundBurstWatch(25000);
+    return true;
+  } catch (e) {
+    if (!silent) publishStatus.textContent = 'failed to load Sync FULL: ' + e.message;
+    payloadSyncStatus.textContent = e.message;
+    return false;
+  }
+}
+
+async function encodeJsonToHex() {
+  const json = payloadJson.value.trim();
+  const topicVal = topic.value.trim();
+  if (!json || !topicVal) {
+    payloadSyncStatus.textContent = json ? 'Topic required to encode JSON' : '';
+    return;
+  }
+  if (!looksLikeJsonPayload(json)) {
+    payloadSyncStatus.textContent = 'JSON must start with { or [';
+    return;
+  }
+  const token = ++payloadSyncToken;
+  payloadSyncStatus.textContent = 'encoding…';
+  try {
+    const r = await fetch('/api/encode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topicVal, json }),
+    });
+    const j = await r.json();
+    if (token !== payloadSyncToken) return;
+    if (!r.ok) {
+      payloadSyncStatus.textContent = j.error || 'encode failed';
+      return;
+    }
+    syncingFromJson = true;
+    payload.value = j.payloadHex || '';
+    syncingFromJson = false;
+    payloadSyncStatus.textContent = j.messageType
+      ? `Hex synced (${j.messageType}, ${j.payloadLength || 0} bytes)`
+      : 'Hex synced';
+  } catch (e) {
+    if (token !== payloadSyncToken) return;
+    payloadSyncStatus.textContent = 'encode failed: ' + e.message;
+  }
+}
+
+async function decodeHexToJson() {
+  const hexRaw = payload.value.trim();
+  const topicVal = topic.value.trim();
+  if (!hexRaw || !topicVal || !looksLikeHexPayload(hexRaw)) return;
+  const token = ++payloadSyncToken;
+  payloadSyncStatus.textContent = 'decoding…';
+  try {
+    const r = await fetch('/api/decode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ topic: topicVal, payloadHex: hexRaw.replace(/\s+/g, '') }),
+    });
+    const j = await r.json();
+    if (token !== payloadSyncToken) return;
+    if (!r.ok) {
+      payloadSyncStatus.textContent = j.error || 'decode failed';
+      return;
+    }
+    if (j.payloadJson) {
+      syncingFromHex = true;
+      payloadJson.value = j.payloadJson;
+      syncingFromHex = false;
+      payloadSyncStatus.textContent = `JSON synced (${j.payloadLength || 0} bytes)`;
+    } else {
+      payloadSyncStatus.textContent = 'Decoded but no payloadJson';
+    }
+  } catch (e) {
+    if (token !== payloadSyncToken) return;
+    payloadSyncStatus.textContent = 'decode failed: ' + e.message;
+  }
+}
+
+function scheduleJsonToHex() {
+  if (syncingFromHex) return;
+  clearTimeout(payloadSyncTimer);
+  payloadSyncTimer = setTimeout(() => { encodeJsonToHex(); }, 350);
+}
+
+function scheduleHexToJson() {
+  if (syncingFromJson) return;
+  clearTimeout(payloadSyncTimer);
+  payloadSyncTimer = setTimeout(() => { decodeHexToJson(); }, 350);
+}
+
+payloadJson.addEventListener('input', scheduleJsonToHex);
+payload.addEventListener('input', () => {
+  const v = payload.value.trim();
+  if (looksLikeHexPayload(v)) scheduleHexToJson();
+});
+topic.addEventListener('change', () => {
+  if (payloadJson.value.trim()) scheduleJsonToHex();
+});
+
+function appendMqttLog(entry) {
+  const at = entry.at ? formatTimeIst(entry.at) : '';
+  const level = (entry.level || 'info').toUpperCase();
+  const device = entry.deviceId ? ` [${entry.deviceId.slice(0, 8)}…]` : '';
+  const line = `${at} ${level}${device} ${entry.message || ''}`;
+  mqttLogLines.push(line);
+  while (mqttLogLines.length > MAX_MQTT_LOG_LINES) mqttLogLines.shift();
+  mqttGlobalLog.textContent = mqttLogLines.join('\n');
+  mqttGlobalLog.scrollTop = mqttGlobalLog.scrollHeight;
+  mqttLogCount.textContent = `${mqttLogLines.length} line(s)`;
+}
+
+async function loadMqttLog() {
+  try {
+    const j = await fetch('/api/mqtt/log?limit=200').then(r => r.json());
+    mqttLogLines.length = 0;
+    for (const entry of j.entries || []) {
+      appendMqttLog(entry);
+    }
+    if (!mqttLogLines.length) {
+      mqttGlobalLog.textContent = 'No MQTT events yet.';
+      mqttLogCount.textContent = '';
+    }
+  } catch (err) {
+    console.warn('Failed to load MQTT log:', err);
+  }
+}
+
+document.getElementById('clearMqttLog').onclick = async () => {
+  mqttLogLines.length = 0;
+  mqttGlobalLog.textContent = 'No MQTT events yet.';
+  mqttLogCount.textContent = '';
+  try {
+    await fetch('/api/mqtt/log', { method: 'DELETE' });
+  } catch (err) {
+    console.warn('Failed to clear MQTT log:', err);
+  }
+};
+
+document.getElementById('applyAutoDispose').onclick = async () => {
+  const minutes = Math.max(1, Number(autoDisposeMinutes.value) || 60);
+  autoDisposeMinutes.value = String(minutes);
+  try {
+    const r = await fetch('/api/mqtt/auto-dispose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: autoDisposeEnabled.checked, minutes }),
+    });
+    const j = await r.json();
+    if (!r.ok) {
+      autoDisposeStatus.textContent = j.error || 'failed';
+      return;
+    }
+    formatAutoDisposeStatus(j);
+  } catch (e) {
+    autoDisposeStatus.textContent = String(e);
+  }
+};
 
 document.getElementById('connect').onclick = async () => {
   connStatus.textContent = 'connecting...';
@@ -579,8 +980,6 @@ document.getElementById('connect').onclick = async () => {
       connStatus.className = 'badge badge-err';
       return;
     }
-    connStatus.textContent = 'connected';
-    connStatus.className = 'badge badge-ok';
     await loadStatus();
   } catch (e) {
     connectLog.textContent = e.name === 'AbortError'
@@ -604,8 +1003,6 @@ document.getElementById('disconnect').onclick = async () => {
       connStatus.className = 'badge badge-err';
       return;
     }
-    connStatus.textContent = 'disconnected';
-    connStatus.className = 'badge badge-err';
     await loadStatus();
   } catch (e) {
     connStatus.textContent = 'failed';
@@ -614,14 +1011,32 @@ document.getElementById('disconnect').onclick = async () => {
   }
 };
 
+document.getElementById('disconnectAll').onclick = async () => {
+  connStatus.textContent = 'closing...';
+  connStatus.className = 'badge';
+  try {
+    const r = await fetch('/api/mqtt/disconnect-all', { method: 'POST' });
+    const j = await r.json();
+    if (!r.ok) {
+      connStatus.textContent = j.error || 'failed';
+      connStatus.className = 'badge badge-err';
+      return;
+    }
+    await loadStatus();
+  } catch (e) {
+    connStatus.textContent = 'failed';
+    connStatus.className = 'badge badge-err';
+  }
+};
+
 loadStatus().catch(e => status.textContent = 'status error: ' + e);
 fetch('/api/devices').then(r => r.json()).then(data => {
   if (!data.devices?.length) window.location.href = '/';
 }).catch(() => {});
 loadInboundFromStorage();
-loadInboundHistory()
-  .then(() => syncInboundToServer())
-  .catch(e => status.textContent = 'inbound load error: ' + e);
+loadInboundHistory().catch(e => status.textContent = 'inbound load error: ' + e);
+loadMqttLog();
+
 const es = new EventSource('/api/events');
 es.onmessage = e => {
   try {
@@ -630,6 +1045,20 @@ es.onmessage = e => {
     console.error('Inbound SSE parse error:', err, e.data);
   }
 };
+es.addEventListener('mqttLog', e => {
+  try {
+    appendMqttLog(JSON.parse(e.data));
+  } catch (err) {
+    console.error('MQTT log SSE parse error:', err);
+  }
+});
+es.addEventListener('session', e => {
+  try {
+    applySessionEvent(JSON.parse(e.data));
+  } catch (err) {
+    console.error('Session SSE parse error:', err);
+  }
+});
 es.onerror = () => {
   if (!connStatus.textContent.includes('sse lost')) {
     connStatus.textContent += ' (sse lost)';
@@ -638,14 +1067,19 @@ es.onerror = () => {
 
 document.getElementById('publish').onclick = async () => {
   publishStatus.textContent = 'publishing...';
+  const body = payload.value.trim()
+    ? { topic: topic.value.trim(), payload: payload.value.trim(), retain: retain.checked }
+    : { topic: topic.value.trim(), payload: payloadJson.value.trim(), retain: retain.checked };
   const r = await fetch('/api/publish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ topic: topic.value.trim(), payload: payload.value.trim(), retain: retain.checked })
+    body: JSON.stringify(body)
   });
   const j = await r.json();
   publishStatus.textContent = r.ok ? 'published' : (j.error || 'failed');
 };
+
+document.getElementById('loadSyncFull').onclick = () => loadSyncFullPreset({ publish: true });
 
 document.querySelectorAll('[data-preset]').forEach(btn => {
   btn.onclick = async () => {

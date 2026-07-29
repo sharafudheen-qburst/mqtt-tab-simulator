@@ -1,6 +1,8 @@
+using Bedrock.DigiMine.DeviceSyncService.ProtoDecoder;
 using Bedrock.DigiMine.DeviceSyncService.TabletSimulator.Configuration;
 using Bedrock.DigiMine.Protos.OT;
 using Google.Protobuf;
+using DssMqttFilters = Bedrock.DigiMine.DeviceSyncService.Domain.Constants.MqttSubscriptionFilters;
 
 namespace Bedrock.DigiMine.DeviceSyncService.TabletSimulator.Mqtt;
 
@@ -14,6 +16,19 @@ public static class TabletPayloadFactory
             Payload = new SyncPayload { Type = syncType, ShiftId = shiftId ?? string.Empty },
         };
         return request.ToByteArray();
+    }
+
+    /// <summary>
+    /// Builds Sync FULL uplink topic, wire-faithful JSON (device/equipment IDs filled), and hex payload.
+    /// </summary>
+    public static (string Topic, string Json, string PayloadHex, string MessageType) CreateSyncFullPreview(
+        DeviceOptions device)
+    {
+        var topic = TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId);
+        var bytes = CreateSyncRequest(device);
+        var decoded = MqttProtoDecoder.Decode(topic, bytes, "sync-full preset");
+        var json = MqttProtoDecoder.FormatPayloadJson(decoded.Root, decoded.WireBytes, decodeInnerPayload: false);
+        return (topic, json, Convert.ToHexString(bytes), decoded.MessageType);
     }
 
     public static byte[] CreateHeartbeat()

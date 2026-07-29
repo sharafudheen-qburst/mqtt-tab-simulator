@@ -11,6 +11,7 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
         SimulatorConfig config,
         SimulatorConfigStore configStore,
         TabletMqttClient mqttClient,
+        MqttActivityLog mqttActivityLog,
         SimulatorDatabase database,
         InboundMessageStore inboundMessages,
         AppStorageStore appStorage,
@@ -19,6 +20,7 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
         Config = config;
         ConfigStore = configStore;
         MqttClient = mqttClient;
+        MqttActivityLog = mqttActivityLog;
         Database = database;
         InboundMessages = inboundMessages;
         AppStorage = appStorage;
@@ -28,6 +30,7 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
     public SimulatorConfig Config { get; }
     public SimulatorConfigStore ConfigStore { get; }
     public TabletMqttClient MqttClient { get; }
+    public MqttActivityLog MqttActivityLog { get; }
     public SimulatorDatabase Database { get; }
     public InboundMessageStore InboundMessages { get; }
     public AppStorageStore AppStorage { get; }
@@ -53,7 +56,16 @@ public static class TabletSimulatorDependencyInjection
         var appStorage = new AppStorageStore(database);
         var devices = new DeviceStore(database);
         devices.SyncWithConfig(config);
-        var mqttClient = new TabletMqttClient(config, inboundMessages);
-        return new TabletSimulatorContext(config, configStore, mqttClient, database, inboundMessages, appStorage, devices);
+        var mqttActivityLog = new MqttActivityLog();
+        var mqttClient = new TabletMqttClient(config, inboundMessages, mqttActivityLog);
+        return new TabletSimulatorContext(
+            config,
+            configStore,
+            mqttClient,
+            mqttActivityLog,
+            database,
+            inboundMessages,
+            appStorage,
+            devices);
     }
 }

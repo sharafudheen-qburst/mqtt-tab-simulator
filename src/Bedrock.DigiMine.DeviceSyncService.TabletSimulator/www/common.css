@@ -41,6 +41,10 @@ input[readonly] { background: #e9ecef; color: #495057; }
   background: #fff;
 }
 
+.inbound-table-scroll-tall {
+  max-height: 520px;
+}
+
 .inbound-table-scroll table {
   margin: 0;
 }
@@ -54,7 +58,32 @@ input[readonly] { background: #e9ecef; color: #495057; }
 }
 
 .inbound-row {
-  cursor: help;
+  cursor: default;
+}
+
+.inline-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.mqtt-session-bar {
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.mqtt-session-panel {
+  margin-bottom: 16px;
+}
+
+.mqtt-log {
+  max-height: 220px;
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .inbound-row:hover {
@@ -161,4 +190,22 @@ textarea#enrollResponse {
   padding: 8px;
   border: 1px solid #ced4da;
   border-radius: 4px;
+}
+
+textarea.payload-json {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  font-family: Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 8px;
+  border: 1px solid #ced4da;
+  border-radius: 4px;
+  max-height: 400px;
+  min-height: 140px;
+  overflow: auto;
+  resize: vertical;
+  white-space: pre;
 }

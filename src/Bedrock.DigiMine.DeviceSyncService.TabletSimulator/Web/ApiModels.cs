@@ -18,6 +18,14 @@ public sealed class ConnectRequest
     public bool SaveActive { get; set; } = true;
 }
 
+public sealed class MqttAutoDisposeRequest
+{
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>Minutes until auto disconnect. Default 60 (1 hour) when omitted or invalid.</summary>
+    public int? Minutes { get; set; }
+}
+
 public sealed class CertificateUploadRequest
 {
     public string EnvironmentName { get; set; } = string.Empty;
@@ -109,6 +117,14 @@ public sealed class DecodeRequest
 {
     public string Topic { get; set; } = string.Empty;
     public string PayloadHex { get; set; } = string.Empty;
+}
+
+public sealed class EncodeRequest
+{
+    public string Topic { get; set; } = string.Empty;
+
+    /// <summary>Protobuf JSON (or decoder-output text containing "Decoded payload:").</summary>
+    public string Json { get; set; } = string.Empty;
 }
 
 public sealed class InboundSyncRequest

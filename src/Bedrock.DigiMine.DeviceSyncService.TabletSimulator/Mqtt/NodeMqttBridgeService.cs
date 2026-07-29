@@ -78,6 +78,8 @@ public sealed class NodeMqttBridgeService
         MqttEnvironment environment,
         string clientId,
         IReadOnlyList<string> topics,
+        EventHandler<TabletInboundMessageEventArgs>? onMessage = null,
+        EventHandler<string>? onLog = null,
         TimeSpan? connectTimeout = null,
         CancellationToken cancellationToken = default)
     {
@@ -92,6 +94,8 @@ public sealed class NodeMqttBridgeService
             this,
             request,
             connectTimeout ?? DefaultTimeout,
+            onMessage,
+            onLog,
             cancellationToken);
     }
 
@@ -272,7 +276,10 @@ public sealed class NodeMqttBridgeService
             Action = action,
             Host = environment.Host,
             Port = environment.Port,
-            ClientId = string.IsNullOrWhiteSpace(environment.ClientId) ? clientId : environment.ClientId,
+            // Always use the caller-provided id (e.g. abcdef-listen / abcdef-pub).
+            // Overwriting with environment.ClientId caused listen+publish to share one id and
+            // the broker kicked the listener on every Sync FULL publish.
+            ClientId = clientId,
             Topic = topic,
             PayloadBase64 = payload is { Length: > 0 } ? Convert.ToBase64String(payload) : null,
             CaFile = environment.Certificates.CaFile,
@@ -281,6 +288,7 @@ public sealed class NodeMqttBridgeService
             Username = string.IsNullOrWhiteSpace(environment.Username) ? null : environment.Username,
             Password = string.IsNullOrWhiteSpace(environment.Password) ? null : environment.Password,
             RejectUnauthorized = environment.SslSecure,
+            CleanSession = environment.CleanSession,
             TimeoutMs = (int)DefaultTimeout.TotalMilliseconds,
             Topics = topics?.ToArray(),
         };
@@ -338,6 +346,7 @@ public sealed class NodeMqttBridgeRequest
     public string? Username { get; init; }
     public string? Password { get; init; }
     public bool RejectUnauthorized { get; init; }
+    public bool CleanSession { get; init; } = true;
     public int TimeoutMs { get; init; }
     public string[]? Topics { get; init; }
 }

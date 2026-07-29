@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading.Channels;
 
 namespace Bedrock.DigiMine.DeviceSyncService.TabletSimulator.Mqtt;
 
@@ -15,8 +16,15 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
 
     private readonly Process _process;
     private readonly CancellationTokenSource _cts = new();
+    private readonly Channel<PendingMqttMessage> _inboundChannel = Channel.CreateUnbounded<PendingMqttMessage>(
+        new UnboundedChannelOptions { SingleReader = true, SingleWriter = false });
     private Task _readLoopTask = Task.CompletedTask;
+    private Task _processLoopTask = Task.CompletedTask;
+    private readonly List<string> _confirmedTopics = [];
+    private readonly object _confirmedLock = new();
     private bool _connected;
+    private bool _subscriptionsReady;
+    private int _expectedSubscriptionCount;
 
     private NodeMqttListenerSession(Process process)
     {
@@ -27,11 +35,24 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
     public event EventHandler<string>? LogReceived;
 
     public bool IsConnected => _connected && !_process.HasExited;
+    public bool SubscriptionsReady => _subscriptionsReady;
+    public IReadOnlyList<string> ConfirmedSubscriptions
+    {
+        get
+        {
+            lock (_confirmedLock)
+            {
+                return _confirmedTopics.ToArray();
+            }
+        }
+    }
 
     public static async Task<NodeMqttListenerSession> StartAsync(
         NodeMqttBridgeService bridge,
         NodeMqttBridgeRequest request,
         TimeSpan connectTimeout,
+        EventHandler<TabletInboundMessageEventArgs>? onMessage = null,
+        EventHandler<string>? onLog = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(bridge);
@@ -44,7 +65,22 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
         }
 
         process.BeginErrorReadLine();
-        var session = new NodeMqttListenerSession(process);
+        var session = new NodeMqttListenerSession(process)
+        {
+            _expectedSubscriptionCount = request.Topics?.Length ?? 0,
+        };
+
+        // Attach handlers BEFORE waiting for subscribe-ready so retained/live messages and
+        // subscribe logs are not lost during the connect window.
+        if (onMessage is not null)
+        {
+            session.MessageReceived += onMessage;
+        }
+
+        if (onLog is not null)
+        {
+            session.LogReceived += onLog;
+        }
 
         process.ErrorDataReceived += (_, e) =>
         {
@@ -63,19 +99,20 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
         timeoutCts.CancelAfter(connectTimeout);
 
         session._readLoopTask = session.ReadStdoutLoopAsync(session._cts.Token);
-        await session.WaitForConnectedAsync(timeoutCts.Token).ConfigureAwait(false);
+        session._processLoopTask = session.ProcessInboundLoopAsync(session._cts.Token);
+        await session.WaitForReadyAsync(timeoutCts.Token).ConfigureAwait(false);
 
         return session;
     }
 
-    private async Task WaitForConnectedAsync(CancellationToken cancellationToken)
+    private async Task WaitForReadyAsync(CancellationToken cancellationToken)
     {
-        while (!_connected && !cancellationToken.IsCancellationRequested)
+        while (!_subscriptionsReady && !cancellationToken.IsCancellationRequested)
         {
             if (_process.HasExited)
             {
                 throw new InvalidOperationException(
-                    $"Node MQTT listener exited before connect (code {_process.ExitCode}).");
+                    $"Node MQTT listener exited before subscribe ready (code {_process.ExitCode}).");
             }
 
             await Task.Delay(50, cancellationToken).ConfigureAwait(false);
@@ -121,6 +158,42 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
         {
             LogReceived?.Invoke(this, $"Listener read error: {ex.Message}");
         }
+        finally
+        {
+            _inboundChannel.Writer.TryComplete();
+        }
+    }
+
+    private async Task ProcessInboundLoopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await foreach (var pending in _inboundChannel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+            {
+                try
+                {
+                    var decoded = TabletMqttClient.DecodeInbound(pending.Topic, pending.Payload);
+                    var inbound = new TabletInboundMessage(
+                        0,
+                        pending.ReceivedAt,
+                        pending.Topic,
+                        pending.Payload.Length,
+                        pending.Retain,
+                        decoded.Summary,
+                        pending.Payload.Length > 0 ? Convert.ToHexString(pending.Payload) : string.Empty,
+                        decoded.EventType,
+                        decoded.EquipmentId);
+                    MessageReceived?.Invoke(this, new TabletInboundMessageEventArgs(inbound));
+                }
+                catch (Exception ex)
+                {
+                    LogReceived?.Invoke(this, $"Inbound decode/dispatch error: {ex.Message}");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
     }
 
     private void HandleEventLine(string line)
@@ -146,9 +219,32 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
             case "connected":
                 _connected = true;
                 LogReceived?.Invoke(this, "Node listener connected to broker");
+                // Zero-topic edge case: still mark ready if no filters were requested.
+                if (_expectedSubscriptionCount <= 0)
+                {
+                    _subscriptionsReady = true;
+                }
+
                 break;
             case "subscribed":
+                if (!string.IsNullOrWhiteSpace(evt.Topic))
+                {
+                    lock (_confirmedLock)
+                    {
+                        if (!_confirmedTopics.Contains(evt.Topic, StringComparer.Ordinal))
+                        {
+                            _confirmedTopics.Add(evt.Topic);
+                        }
+                    }
+                }
+
                 LogReceived?.Invoke(this, $"Subscribed: {evt.Topic}");
+                break;
+            case "ready":
+                _subscriptionsReady = true;
+                LogReceived?.Invoke(
+                    this,
+                    $"Node listener subscriptions ready ({evt.SubscribedCount ?? _expectedSubscriptionCount})");
                 break;
             case "message" when !string.IsNullOrWhiteSpace(evt.Topic):
                 var payload = string.IsNullOrWhiteSpace(evt.PayloadBase64)
@@ -157,18 +253,12 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
                 var receivedAt = DateTimeOffset.TryParse(evt.ReceivedAt, out var parsed)
                     ? parsed
                     : DateTimeOffset.UtcNow;
-                var decoded = TabletMqttClient.DecodeInbound(evt.Topic, payload);
-                var inbound = new TabletInboundMessage(
-                    0,
-                    receivedAt,
-                    evt.Topic,
-                    payload.Length,
-                    evt.Retain,
-                    decoded.Summary,
-                    payload.Length > 0 ? Convert.ToHexString(payload) : string.Empty,
-                    decoded.EventType,
-                    decoded.EquipmentId);
-                MessageReceived?.Invoke(this, new TabletInboundMessageEventArgs(inbound));
+                // Queue quickly so stdout keeps draining during FULL-sync bursts.
+                if (!_inboundChannel.Writer.TryWrite(new PendingMqttMessage(evt.Topic, payload, evt.Retain, receivedAt)))
+                {
+                    LogReceived?.Invoke(this, $"Dropped inbound MQTT message (queue closed): {evt.Topic}");
+                }
+
                 break;
             case "error":
                 LogReceived?.Invoke(this, evt.Message ?? "Node listener error");
@@ -187,6 +277,7 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         await _cts.CancelAsync().ConfigureAwait(false);
+        _inboundChannel.Writer.TryComplete();
 
         // Prefer a clean MQTT unsubscribe + disconnect via stdin stop command.
         try
@@ -241,9 +332,20 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
             // Best effort.
         }
 
+        try
+        {
+            await _processLoopTask.ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best effort.
+        }
+
         _process.Dispose();
         _cts.Dispose();
     }
+
+    private sealed record PendingMqttMessage(string Topic, byte[] Payload, bool Retain, DateTimeOffset ReceivedAt);
 
     private sealed class NodeBridgeEvent
     {
@@ -254,5 +356,7 @@ public sealed class NodeMqttListenerSession : IAsyncDisposable
         public string? ReceivedAt { get; init; }
         public string? Message { get; init; }
         public string? ClientId { get; init; }
+        public int? SubscribedCount { get; init; }
+        public int? FailedCount { get; init; }
     }
 }

@@ -110,6 +110,23 @@ public sealed class InboundMessageStore
         });
     }
 
+    public TabletInboundMessage? GetBySequence(long sequence) =>
+        _database.Execute(connection =>
+        {
+            using var command = connection.CreateCommand();
+            command.CommandText =
+                """
+                SELECT sequence, received_at, topic, payload_length, retained,
+                       decoded_summary, payload_hex, event_type, equipment_id
+                FROM inbound_messages
+                WHERE sequence = $sequence
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$sequence", sequence);
+            using var reader = command.ExecuteReader();
+            return reader.Read() ? ReadMessage(reader) : null;
+        });
+
     public int Count() =>
         _database.Execute(connection =>
         {
