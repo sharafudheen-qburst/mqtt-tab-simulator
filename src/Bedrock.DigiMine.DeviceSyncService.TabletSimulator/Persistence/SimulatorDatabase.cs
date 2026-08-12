@@ -90,6 +90,21 @@ public sealed class SimulatorDatabase : IDisposable
                   certificate_folder TEXT NOT NULL DEFAULT '',
                   updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS outbound_messages (
+                  sequence INTEGER PRIMARY KEY,
+                  published_at TEXT NOT NULL,
+                  topic TEXT NOT NULL,
+                  payload_length INTEGER NOT NULL,
+                  retained INTEGER NOT NULL,
+                  decoded_summary TEXT NOT NULL,
+                  payload_hex TEXT NOT NULL,
+                  event_type TEXT,
+                  equipment_id TEXT
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_outbound_published_at
+                  ON outbound_messages(published_at DESC);
                 """;
             command.ExecuteNonQuery();
 

@@ -3,7 +3,7 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
-    <PackageVersion Include="BGT.DigiMine.Grpc.Shared" Version="1.0.160" />
+    <PackageVersion Include="BGT.DigiMine.Grpc.Shared" Version="1.0.168" />
     <PackageVersion Include="Google.Protobuf" Version="3.31.1" />
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.6" />
     <PackageVersion Include="MQTTnet" Version="4.3.7.1207" />

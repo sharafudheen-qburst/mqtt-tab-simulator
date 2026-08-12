@@ -16,10 +16,12 @@ public sealed class TabletMqttClient : IAsyncDisposable
 
     private readonly SimulatorConfig _config;
     private readonly InboundMessageStore _inboundStore;
+    private readonly OutboundMessageStore _outboundStore;
     private readonly MqttActivityLog _activityLog;
     private readonly IMqttClient _client;
     private readonly NodeMqttBridgeService _nodeBridge = new();
     private long _inboundSequence;
+    private long _outboundSequence;
     private readonly object _connectLock = new();
     private readonly object _disposeTimerLock = new();
     private MqttEnvironment _activeEnvironment;
@@ -32,16 +34,24 @@ public sealed class TabletMqttClient : IAsyncDisposable
     private CancellationTokenSource? _autoDisposeCts;
     private int _autoDisposeGeneration;
     private const int MaxInboundMessages = 2000;
+    private const int MaxOutboundMessages = 2000;
 
-    public TabletMqttClient(SimulatorConfig config, InboundMessageStore inboundStore, MqttActivityLog activityLog)
+    public TabletMqttClient(
+        SimulatorConfig config,
+        InboundMessageStore inboundStore,
+        OutboundMessageStore outboundStore,
+        MqttActivityLog activityLog)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(inboundStore);
+        ArgumentNullException.ThrowIfNull(outboundStore);
         ArgumentNullException.ThrowIfNull(activityLog);
         _config = config;
         _inboundStore = inboundStore;
+        _outboundStore = outboundStore;
         _activityLog = activityLog;
         _inboundSequence = inboundStore.GetMaxSequence();
+        _outboundSequence = outboundStore.GetMaxSequence();
         _activeEnvironment = config.PrepareEnvironmentForDevice(config.GetActiveEnvironment());
         _client = new MqttFactory().CreateMqttClient();
         _client.ApplicationMessageReceivedAsync += OnMessageReceivedAsync;
@@ -52,6 +62,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
     public event EventHandler? SessionChanged;
     public IReadOnlyList<string> ActiveSubscriptions { get; private set; } = [];
     public IReadOnlyCollection<TabletInboundMessage> RecentInbound => _inboundStore.GetRecent(MaxInboundMessages);
+    public IReadOnlyCollection<TabletInboundMessage> RecentOutbound => _outboundStore.GetRecent(MaxOutboundMessages);
     public string ActiveEnvironmentName => _activeEnvironment.Name;
     public bool IsConnected => _nodeBridgeConnected || _client.IsConnected;
     public bool UsesNodeBridge => _nodeBridgeConnected;
@@ -202,7 +213,11 @@ public sealed class TabletMqttClient : IAsyncDisposable
         await DisconnectAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task PublishAsync(string uplinkTopic, byte[] payload, bool retain = false, CancellationToken cancellationToken = default)
+    public async Task<TabletInboundMessage> PublishAsync(
+        string uplinkTopic,
+        byte[] payload,
+        bool retain = false,
+        CancellationToken cancellationToken = default)
     {
         if (_nodeBridgeConnected)
         {
@@ -225,7 +240,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
                 throw new InvalidOperationException(result.Error ?? "Node bridge publish failed.");
             }
 
-            return;
+            return RecordOutbound(uplinkTopic, payload, retain);
         }
 
         var message = new MqttApplicationMessageBuilder()
@@ -236,9 +251,10 @@ public sealed class TabletMqttClient : IAsyncDisposable
             .Build();
 
         await _client.PublishAsync(message, cancellationToken).ConfigureAwait(false);
+        return RecordOutbound(uplinkTopic, payload, retain);
     }
 
-    public Task PublishPresetAsync(UplinkPreset preset, CancellationToken cancellationToken = default)
+    public async Task<TabletInboundMessage> PublishPresetAsync(UplinkPreset preset, CancellationToken cancellationToken = default)
     {
         var device = _config.Device;
         var (topic, payload) = preset switch
@@ -251,7 +267,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
             _ => throw new ArgumentOutOfRangeException(nameof(preset), preset, null),
         };
 
-        return PublishAsync(topic, payload, retain: false, cancellationToken);
+        return await PublishAsync(topic, payload, retain: false, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task PublishAckAsync(string messageId, CancellationToken cancellationToken = default)
@@ -260,7 +276,11 @@ public sealed class TabletMqttClient : IAsyncDisposable
         await PublishAsync(topic, TabletPayloadFactory.CreateAck(_config.Device, messageId), retain: false, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task PublishRawAsync(string uplinkTopic, string filePathOrHexOrJson, bool retain = false, CancellationToken cancellationToken = default)
+    public async Task<TabletInboundMessage> PublishRawAsync(
+        string uplinkTopic,
+        string filePathOrHexOrJson,
+        bool retain = false,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(filePathOrHexOrJson);
 
@@ -274,8 +294,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
 
             var (_, json, _, _) = MqttProtoEncoder.ResolveJsonInput(input);
             var encoded = MqttProtoEncoder.Encode(uplinkTopic, json);
-            await PublishAsync(uplinkTopic, encoded.WireBytes.ToArray(), retain, cancellationToken).ConfigureAwait(false);
-            return;
+            return await PublishAsync(uplinkTopic, encoded.WireBytes.ToArray(), retain, cancellationToken).ConfigureAwait(false);
         }
 
         var (resolvedTopic, bytes, _, topicAutoDetected, _) = MqttProtoDecoder.ResolveInput(input);
@@ -285,7 +304,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
             throw new InvalidOperationException("Topic is required when the input is not an MQTT PUBLISH capture.");
         }
 
-        await PublishAsync(topic, bytes, retain, cancellationToken).ConfigureAwait(false);
+        return await PublishAsync(topic, bytes, retain, cancellationToken).ConfigureAwait(false);
     }
 
     private static bool LooksLikeJsonPayload(string input)
@@ -628,6 +647,27 @@ public sealed class TabletMqttClient : IAsyncDisposable
             $"Inbound MQTT #{sequenced.Sequence}: {sequenced.Topic} ({sequenced.PayloadLength} bytes, retain={sequenced.Retained})",
             _config.Device.DeviceId);
         InboundReceived?.Invoke(this, new TabletInboundMessageEventArgs(sequenced));
+    }
+
+    private TabletInboundMessage RecordOutbound(string topic, byte[] payload, bool retain)
+    {
+        var decoded = DecodeInbound(topic, payload);
+        var outbound = new TabletInboundMessage(
+            0,
+            DateTimeOffset.UtcNow,
+            topic,
+            payload.Length,
+            retain,
+            decoded.Summary,
+            payload.Length > 0 ? Convert.ToHexString(payload) : string.Empty,
+            decoded.EventType,
+            decoded.EquipmentId);
+        var sequenced = outbound with { Sequence = Interlocked.Increment(ref _outboundSequence) };
+        _outboundStore.Save(sequenced);
+        _activityLog.Info(
+            $"Outbound MQTT #{sequenced.Sequence}: {sequenced.Topic} ({sequenced.PayloadLength} bytes, retain={sequenced.Retained})",
+            _config.Device.DeviceId);
+        return sequenced;
     }
 
     internal static string DecodeInboundSummary(string topic, byte[] payload) =>

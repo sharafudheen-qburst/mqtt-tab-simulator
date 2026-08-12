@@ -401,6 +401,28 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 return;
             }
 
+            if (path == "/api/outbound" && method == "GET")
+            {
+                await HandleGetOutboundAsync(http).ConfigureAwait(false);
+                return;
+            }
+
+            if (path.StartsWith("/api/outbound/", StringComparison.Ordinal) && method == "GET")
+            {
+                var sequenceRaw = path["/api/outbound/".Length..];
+                if (long.TryParse(sequenceRaw, out var sequence))
+                {
+                    await HandleGetOutboundBySequenceAsync(http, sequence).ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            if (path == "/api/outbound" && method == "DELETE")
+            {
+                await HandleClearOutboundAsync(http).ConfigureAwait(false);
+                return;
+            }
+
             if (path == "/api/decode" && method == "POST")
             {
                 await HandleDecodeAsync(http).ConfigureAwait(false);
@@ -416,6 +438,12 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
             if (path == "/api/presets/sync-full" && method == "GET")
             {
                 await HandleSyncFullPresetAsync(http).ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/api/presets/task-event" && method == "GET")
+            {
+                await HandleTaskEventPresetAsync(http).ConfigureAwait(false);
                 return;
             }
 
@@ -1333,9 +1361,11 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
 
         try
         {
+            TabletInboundMessage outbound;
             if (!string.IsNullOrWhiteSpace(request.Payload))
             {
-                await _context.MqttClient.PublishRawAsync(request.Topic, request.Payload, request.Retain).ConfigureAwait(false);
+                outbound = await _context.MqttClient.PublishRawAsync(request.Topic, request.Payload, request.Retain)
+                    .ConfigureAwait(false);
             }
             else if (!string.IsNullOrWhiteSpace(request.Preset))
             {
@@ -1348,7 +1378,7 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                     "TASKEVENT" => UplinkPreset.TaskEvent,
                     _ => throw new InvalidOperationException($"Unknown preset: {request.Preset}"),
                 };
-                await _context.MqttClient.PublishPresetAsync(preset).ConfigureAwait(false);
+                outbound = await _context.MqttClient.PublishPresetAsync(preset).ConfigureAwait(false);
             }
             else
             {
@@ -1357,7 +1387,11 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 return;
             }
 
-            await WriteJsonAsync(http, new { ok = true }).ConfigureAwait(false);
+            await WriteJsonAsync(http, new
+            {
+                ok = true,
+                outbound = ToOutboundDto(outbound),
+            }).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is FileNotFoundException or FormatException or InvalidOperationException
             or System.Text.Json.JsonException)
@@ -1365,6 +1399,44 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
             http.Response.StatusCode = 400;
             await WriteJsonAsync(http, new { error = ex.Message }).ConfigureAwait(false);
         }
+    }
+
+    private async Task HandleGetOutboundAsync(HttpListenerContext http)
+    {
+        var limit = 2000;
+        var limitRaw = http.Request.QueryString["limit"];
+        if (!string.IsNullOrWhiteSpace(limitRaw)
+            && int.TryParse(limitRaw, out var parsed)
+            && parsed > 0)
+        {
+            limit = Math.Min(parsed, 5000);
+        }
+
+        await WriteJsonAsync(http, new
+        {
+            databasePath = _context.Database.DatabasePath,
+            total = _context.OutboundMessages.Count(),
+            messages = _context.OutboundMessages.GetRecent(limit).Select(ToOutboundDto).ToArray(),
+        }).ConfigureAwait(false);
+    }
+
+    private async Task HandleGetOutboundBySequenceAsync(HttpListenerContext http, long sequence)
+    {
+        var message = _context.OutboundMessages.GetBySequence(sequence);
+        if (message is null)
+        {
+            http.Response.StatusCode = 404;
+            await WriteJsonAsync(http, new { error = "message not found" }).ConfigureAwait(false);
+            return;
+        }
+
+        await WriteJsonAsync(http, ToOutboundDto(message)).ConfigureAwait(false);
+    }
+
+    private async Task HandleClearOutboundAsync(HttpListenerContext http)
+    {
+        _context.OutboundMessages.Clear();
+        await WriteJsonAsync(http, new { ok = true }).ConfigureAwait(false);
     }
 
     private async Task HandleGetInboundAsync(HttpListenerContext http)
@@ -1526,6 +1598,32 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
         }
     }
 
+    private async Task HandleTaskEventPresetAsync(HttpListenerContext http)
+    {
+        try
+        {
+            var eventType = http.Request.QueryString["eventType"];
+            var (topic, json, payloadHex, messageType, resolvedEventType) =
+                TabletPayloadFactory.CreateTaskEventPreview(_context.Config.Device, eventType);
+            await WriteJsonAsync(http, new
+            {
+                ok = true,
+                topic,
+                json,
+                payloadHex,
+                messageType,
+                eventType = resolvedEventType,
+                deviceId = _context.Config.Device.DeviceId,
+                equipmentId = _context.Config.Device.EquipmentId,
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or InvalidProtocolBufferException)
+        {
+            http.Response.StatusCode = 400;
+            await WriteJsonAsync(http, new { error = ex.Message }).ConfigureAwait(false);
+        }
+    }
+
     private async Task HandleGetStorageAsync(HttpListenerContext http, string key)
     {
         key = Uri.UnescapeDataString(key);
@@ -1632,6 +1730,20 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
     private static object ToInboundDto(TabletInboundMessage message) => new
     {
         message.Sequence,
+        receivedAt = message.ReceivedAt.ToString("O"),
+        message.Topic,
+        message.PayloadLength,
+        message.Retained,
+        message.DecodedSummary,
+        message.PayloadHex,
+        eventType = message.EventType,
+        equipmentId = message.EquipmentId,
+    };
+
+    private static object ToOutboundDto(TabletInboundMessage message) => new
+    {
+        message.Sequence,
+        publishedAt = message.ReceivedAt.ToString("O"),
         receivedAt = message.ReceivedAt.ToString("O"),
         message.Topic,
         message.PayloadLength,

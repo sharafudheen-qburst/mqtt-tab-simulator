@@ -215,12 +215,12 @@ Sos
 SosEvent
 deviceId, equipmentId, messageId, timestamp
 TaskEvent
-EventEnvelope
-default EventType.TaskCreated
+EventEnvelope + inner XxxPayload
+default TaskCreated (adHoc=true) with sample task fields; CreateTaskEventPreview decodes nested payload JSON
 Ack
 AckMessage
 via PublishAckAsync(messageId)
-All envelopes include: messageId, deviceId, equipmentId, timestamps, version="1", priority=1.
+All envelopes include: messageId, deviceId, equipmentId, timestamps, version="1", priority=1. Task presets also set taskId/shiftId/operatorId/workplaceId where applicable.
 
 9. REST API (TabletSimulatorWebHost)
 Base: http://localhost:{port}
@@ -311,17 +311,29 @@ GET
 /api/presets/sync-full
 Default Sync FULL for active device: `{ topic, json, payloadHex, messageType, deviceId, equipmentId }`
 GET
+/api/presets/task-event
+Default task EventEnvelope for active device: `?eventType=TaskCreated` (etc.) → `{ topic, json, payloadHex, messageType, eventType, deviceId, equipmentId }` (JSON includes nested inner payload)
+GET
 /api/inbound
 Recent inbound messages (server memory/SQLite; default limit 2000)
 GET
 /api/inbound/{sequence}
 Full inbound message including `payloadHex` (used when live SSE omitted hex)
 GET
+/api/outbound
+Recent outbound (uplink) publishes (SQLite; default limit 2000)
+GET
+/api/outbound/{sequence}
+Full outbound message including `payloadHex`
+DELETE
+/api/outbound
+Clear outbound history
+GET
 /api/events
 SSE stream: unnamed = inbound live messages (summary truncated, no hex); `event: mqttLog` / `event: session` for lifecycle (no inbound history dump on connect)
 POST
 /api/publish
-{ topic, payload? } or { topic, preset? } — payload may be hex, file, or JSON (JSON encoded via MqttProtoEncoder)
+{ topic, payload? } or { topic, preset? } — payload may be hex, file, or JSON (JSON encoded via MqttProtoEncoder); response includes `{ ok, outbound }` row metadata
 Publish presets (API)
 SYNC, SYNC-FULL, SYNC-CONFIG, HEARTBEAT, TELEMETRY, SOS, TASKEVENT
 
@@ -364,7 +376,11 @@ Build/copy Domain+ProtoDecoder to lib/; bump Grpc.Shared in Directory.Packages.p
 Mqtt/ClientPkcs12Exporter.cs
 Export PEM → PFX
 Persistence/SimulatorDatabase.cs
-SQLite `simulator.db` (inbound_messages, app_storage, devices)
+SQLite `simulator.db` (inbound_messages, outbound_messages, app_storage, devices)
+Persistence/InboundMessageStore.cs
+Inbound downlink CRUD in SQLite
+Persistence/OutboundMessageStore.cs
+Outbound uplink publish history in SQLite
 Persistence/DeviceStore.cs
 Device list CRUD in SQLite; sync with config on startup
 Web/TabletSimulatorWebHost.cs
@@ -402,9 +418,10 @@ Home (home.html / index.html)
 Device/equipment ID display
 Environment selector + Connect/Disconnect/Close all MQTT + auto-dispose (default 1 hour)
 Global MQTT log + last connection attempt panel
-Inbound table (service → device): SSE live updates (incremental rows), search, event type column, view decoded log / hex payload, export JSON, clear; visible cap 500 rows; after Sync FULL polls `/api/inbound` for ~25s so burst replies are not missed; light localStorage (no hex)
+Inbound table (service → device): SSE live updates, search, event type column, view decoded log / hex payload, export JSON, clear; visible cap 500 rows; after Sync FULL polls `/api/inbound` for ~25s so burst replies are not missed; light localStorage (no hex)
 Times shown in IST (Asia/Kolkata)
-Publish section: topic + editable Sync FULL JSON textarea (max 400px, auto-encodes to hex via `/api/encode`) + hex payload field; Sync FULL loads default SyncRequest for active device/equipment then publishes; Heartbeat preset publishes immediately; retain flag. Inbound table is downlink-only.
+Publish section (Sync | Task tabs): Sync tab — Sync FULL JSON editor + Heartbeat; Task tab — event-type dropdown + EventEnvelope JSON editor (nested payload) + Load preset / Publish; both auto-encode hex via `/api/encode`
+Outbound table (device → service): same columns as Inbound; populated on successful publish; SQLite `outbound_messages` + light localStorage; search / refresh / export / clear / view log+hex
 Settings (settings.html)
 Multi-environment CRUD (add/delete)
 Active device ID (read-only; managed on Devices page) / Equipment ID editable
@@ -517,6 +534,7 @@ Shared DLLs from lib/ (DSS Domain + ProtoDecoder). See PROJECT_SNAPSHOT.md.
 
 | Date & time (UTC) | Change |
 |-------------------|--------|
+| 2026-08-11 | Home Publish: Sync \| Task tabs; Task tab edits EventEnvelope JSON (nested payload) via `/api/presets/task-event` + encode/publish. Outbound (device → service) grid mirrors Inbound columns; SQLite `outbound_messages`; `GET/DELETE /api/outbound`; publish response includes `outbound` row. Rich TaskCreated (ad-hoc) presets in TabletPayloadFactory. |
 | 2026-07-29 | Inbound table: Refresh button reloads all from SQLite; fixed incremental-render race that could show only one row; lighter localStorage cache (truncated summaries). |
 | 2026-07-29 | Fixed Node bridge clientId collision: listen/publish used same `environment.ClientId`, so Sync FULL publish kicked the listener and downlink never arrived. Handlers now attach before subscribe-ready; Global MQTT log shows each inbound receipt; UI shows subscription READY + confirmed topics. |
 | 2026-07-29 | FULL sync downlink hardening: wait for all MQTT subscriptions before connect-ready; ordered Node inbound queue so bursts are not dropped; slim live SSE (no hex); post–Sync FULL inbound refresh for 25s; visible inbound rows raised to 500; `GET /api/inbound/{sequence}` for full payload. |
