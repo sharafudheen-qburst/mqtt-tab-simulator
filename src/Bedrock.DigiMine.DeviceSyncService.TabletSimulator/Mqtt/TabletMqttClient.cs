@@ -18,6 +18,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
     private readonly InboundMessageStore _inboundStore;
     private readonly OutboundMessageStore _outboundStore;
     private readonly MqttActivityLog _activityLog;
+    private readonly DeviceCatalogStore _deviceCatalog;
     private readonly IMqttClient _client;
     private readonly NodeMqttBridgeService _nodeBridge = new();
     private long _inboundSequence;
@@ -35,21 +36,27 @@ public sealed class TabletMqttClient : IAsyncDisposable
     private int _autoDisposeGeneration;
     private const int MaxInboundMessages = 2000;
     private const int MaxOutboundMessages = 2000;
+    private readonly object _recentLocalUplinkLock = new();
+    private readonly Queue<(string Topic, string PayloadHex, DateTimeOffset At)> _recentLocalUplinks = new();
+    private static readonly TimeSpan RecentLocalUplinkTtl = TimeSpan.FromSeconds(15);
 
     public TabletMqttClient(
         SimulatorConfig config,
         InboundMessageStore inboundStore,
         OutboundMessageStore outboundStore,
-        MqttActivityLog activityLog)
+        MqttActivityLog activityLog,
+        DeviceCatalogStore deviceCatalog)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(inboundStore);
         ArgumentNullException.ThrowIfNull(outboundStore);
         ArgumentNullException.ThrowIfNull(activityLog);
+        ArgumentNullException.ThrowIfNull(deviceCatalog);
         _config = config;
         _inboundStore = inboundStore;
         _outboundStore = outboundStore;
         _activityLog = activityLog;
+        _deviceCatalog = deviceCatalog;
         _inboundSequence = inboundStore.GetMaxSequence();
         _outboundSequence = outboundStore.GetMaxSequence();
         _activeEnvironment = config.PrepareEnvironmentForDevice(config.GetActiveEnvironment());
@@ -59,6 +66,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
 
     public bool EchoToConsole { get; set; }
     public event EventHandler<TabletInboundMessageEventArgs>? InboundReceived;
+    public event EventHandler<TabletInboundMessageEventArgs>? OutboundReceived;
     public event EventHandler? SessionChanged;
     public IReadOnlyList<string> ActiveSubscriptions { get; private set; } = [];
     public IReadOnlyCollection<TabletInboundMessage> RecentInbound => _inboundStore.GetRecent(MaxInboundMessages);
@@ -240,6 +248,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
                 throw new InvalidOperationException(result.Error ?? "Node bridge publish failed.");
             }
 
+            RememberLocalUplink(uplinkTopic, payload);
             return RecordOutbound(uplinkTopic, payload, retain);
         }
 
@@ -251,6 +260,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
             .Build();
 
         await _client.PublishAsync(message, cancellationToken).ConfigureAwait(false);
+        RememberLocalUplink(uplinkTopic, payload);
         return RecordOutbound(uplinkTopic, payload, retain);
     }
 
@@ -261,6 +271,10 @@ public sealed class TabletMqttClient : IAsyncDisposable
         {
             UplinkPreset.SyncFull => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId), TabletPayloadFactory.CreateSyncRequest(device)),
             UplinkPreset.SyncConfig => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId), TabletPayloadFactory.CreateSyncRequest(device, "CONFIG")),
+            UplinkPreset.SyncState => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId), TabletPayloadFactory.CreateSyncRequest(device, "STATE")),
+            UplinkPreset.SyncTask => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId), TabletPayloadFactory.CreateSyncRequest(device, "TASK", Guid.NewGuid().ToString())),
+            UplinkPreset.SyncTumList => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId), TabletPayloadFactory.CreateSyncRequest(device, "TUM_LIST", Guid.NewGuid().ToString())),
+            UplinkPreset.SyncTumState => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSync, device.DeviceId), TabletPayloadFactory.CreateSyncRequest(device, "TUM_STATE", Guid.NewGuid().ToString())),
             UplinkPreset.Heartbeat => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromTelemetry, device.DeviceId), TabletPayloadFactory.CreateHeartbeat()),
             UplinkPreset.Sos => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromSos, device.DeviceId), TabletPayloadFactory.CreateSos(device)),
             UplinkPreset.TaskEvent => (TabletTopicCatalog.ResolveUplinkTopic(DssMqttFilters.SubFromEvents, device.DeviceId), TabletPayloadFactory.CreateTaskEvent(device)),
@@ -536,7 +550,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
             await _client.DisconnectAsync(cancellationToken: cancellationToken).ConfigureAwait(false);
         }
 
-        var filters = TabletTopicCatalog.GetDownlinkSubscriptionFilters(_config.Device.DeviceId);
+        var filters = TabletTopicCatalog.GetAllSubscriptionFilters(_config.Device.DeviceId);
         var listenerClientId = $"{clientId}-listen";
         log?.Info(
             $"Starting Node listener as {listenerClientId} for {filters.Count} topic filter(s): {string.Join(", ", filters)}");
@@ -561,11 +575,33 @@ public sealed class TabletMqttClient : IAsyncDisposable
         log?.Info(
             listener.SubscriptionsReady
                 ? $"Connected via Node bridge — subscriptions ready: {string.Join(", ", listener.ConfirmedSubscriptions.Count > 0 ? listener.ConfirmedSubscriptions : filters)}"
-                : $"Connected via Node bridge — listening for downlink on: {string.Join(", ", filters)}");
+                : $"Connected via Node bridge — listening downlink + uplink on: {string.Join(", ", filters)}");
     }
 
-    private void OnNodeListenerMessage(object? sender, TabletInboundMessageEventArgs e) =>
-        RecordInbound(e.Message);
+    private void OnNodeListenerMessage(object? sender, TabletInboundMessageEventArgs e)
+    {
+        var msg = e.Message;
+        if (!TabletTopicCatalog.IsUplinkTopic(msg.Topic))
+        {
+            var payload = string.IsNullOrWhiteSpace(msg.PayloadHex)
+                ? []
+                : Convert.FromHexString(msg.PayloadHex);
+            var decoded = DecodeInbound(msg.Topic, payload);
+            RecordInbound(msg, decoded.PayloadJson);
+            return;
+        }
+
+        var uplinkPayload = string.IsNullOrWhiteSpace(msg.PayloadHex)
+            ? []
+            : Convert.FromHexString(msg.PayloadHex);
+        if (IsRecentLocalUplink(msg.Topic, uplinkPayload))
+        {
+            // Own publish already recorded via PublishAsync; Node -listen client echoes it.
+            return;
+        }
+
+        RecordOutbound(msg.Topic, uplinkPayload, msg.Retained, msg.ReceivedAt);
+    }
 
     private async Task StopNodeListenerAsync()
     {
@@ -602,7 +638,7 @@ public sealed class TabletMqttClient : IAsyncDisposable
             return;
         }
 
-        var subscriptionFilters = TabletTopicCatalog.GetDownlinkSubscriptionFilters(_config.Device.DeviceId);
+        var subscriptionFilters = TabletTopicCatalog.GetAllSubscriptionFilters(_config.Device.DeviceId);
         var subscribed = new List<string>(subscriptionFilters.Count);
         foreach (var filter in subscriptionFilters)
         {
@@ -623,38 +659,57 @@ public sealed class TabletMqttClient : IAsyncDisposable
     {
         var topic = args.ApplicationMessage.Topic;
         var payload = args.ApplicationMessage.PayloadSegment.ToArray();
+        var retain = args.ApplicationMessage.Retain;
+        if (TabletTopicCatalog.IsUplinkTopic(topic))
+        {
+            if (IsRecentLocalUplink(topic, payload))
+            {
+                return Task.CompletedTask;
+            }
+
+            RecordOutbound(topic, payload, retain);
+            return Task.CompletedTask;
+        }
+
         var decoded = DecodeInbound(topic, payload);
         var inbound = new TabletInboundMessage(
             0,
             DateTimeOffset.UtcNow,
             topic,
             payload.Length,
-            args.ApplicationMessage.Retain,
+            retain,
             decoded.Summary,
             payload.Length > 0 ? Convert.ToHexString(payload) : string.Empty,
             decoded.EventType,
             decoded.EquipmentId);
 
-        RecordInbound(inbound);
+        RecordInbound(inbound, decoded.PayloadJson);
         return Task.CompletedTask;
     }
 
-    private void RecordInbound(TabletInboundMessage inbound)
+    private void RecordInbound(TabletInboundMessage inbound, string? payloadJson = null)
     {
         var sequenced = inbound with { Sequence = Interlocked.Increment(ref _inboundSequence) };
         _inboundStore.Save(sequenced);
+        _deviceCatalog.EnsureDevice(_config.Device.DeviceId, _config.Device.EquipmentId);
+        _deviceCatalog.SetActiveOuId(_config.DigiMine?.OperationalUnitId);
+        _deviceCatalog.Ingest(sequenced.Topic, payloadJson, sequenced.EventType);
         _activityLog.Info(
             $"Inbound MQTT #{sequenced.Sequence}: {sequenced.Topic} ({sequenced.PayloadLength} bytes, retain={sequenced.Retained})",
             _config.Device.DeviceId);
         InboundReceived?.Invoke(this, new TabletInboundMessageEventArgs(sequenced));
     }
 
-    private TabletInboundMessage RecordOutbound(string topic, byte[] payload, bool retain)
+    private TabletInboundMessage RecordOutbound(
+        string topic,
+        byte[] payload,
+        bool retain,
+        DateTimeOffset? receivedAt = null)
     {
         var decoded = DecodeInbound(topic, payload);
         var outbound = new TabletInboundMessage(
             0,
-            DateTimeOffset.UtcNow,
+            receivedAt ?? DateTimeOffset.UtcNow,
             topic,
             payload.Length,
             retain,
@@ -667,7 +722,52 @@ public sealed class TabletMqttClient : IAsyncDisposable
         _activityLog.Info(
             $"Outbound MQTT #{sequenced.Sequence}: {sequenced.Topic} ({sequenced.PayloadLength} bytes, retain={sequenced.Retained})",
             _config.Device.DeviceId);
+        OutboundReceived?.Invoke(this, new TabletInboundMessageEventArgs(sequenced));
         return sequenced;
+    }
+
+    private void RememberLocalUplink(string topic, byte[] payload)
+    {
+        var hex = payload.Length > 0 ? Convert.ToHexString(payload) : string.Empty;
+        var now = DateTimeOffset.UtcNow;
+        lock (_recentLocalUplinkLock)
+        {
+            PruneRecentLocalUplinksLocked(now);
+            _recentLocalUplinks.Enqueue((topic, hex, now));
+            while (_recentLocalUplinks.Count > 64)
+            {
+                _recentLocalUplinks.Dequeue();
+            }
+        }
+    }
+
+    private bool IsRecentLocalUplink(string topic, byte[] payload)
+    {
+        var hex = payload.Length > 0 ? Convert.ToHexString(payload) : string.Empty;
+        var now = DateTimeOffset.UtcNow;
+        lock (_recentLocalUplinkLock)
+        {
+            PruneRecentLocalUplinksLocked(now);
+            foreach (var entry in _recentLocalUplinks)
+            {
+                if (string.Equals(entry.Topic, topic, StringComparison.Ordinal)
+                    && string.Equals(entry.PayloadHex, hex, StringComparison.Ordinal))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private void PruneRecentLocalUplinksLocked(DateTimeOffset now)
+    {
+        while (_recentLocalUplinks.Count > 0
+               && now - _recentLocalUplinks.Peek().At > RecentLocalUplinkTtl)
+        {
+            _recentLocalUplinks.Dequeue();
+        }
     }
 
     internal static string DecodeInboundSummary(string topic, byte[] payload) =>
@@ -764,6 +864,10 @@ public enum UplinkPreset
 {
     SyncFull,
     SyncConfig,
+    SyncState,
+    SyncTask,
+    SyncTumList,
+    SyncTumState,
     Heartbeat,
     Sos,
     TaskEvent,

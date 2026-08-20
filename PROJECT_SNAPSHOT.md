@@ -181,7 +181,7 @@ Filters from Bedrock.DigiMine.DeviceSyncService.Domain.Constants.MqttSubscriptio
 
 Constant	UI preset key
 SubFromSync
-SYNC, SYNC-FULL, SYNC-CONFIG
+SYNC, SYNC-FULL, SYNC-CONFIG, SYNC-STATE, SYNC-TASK, SYNC-TUM-LIST, SYNC-TUM-STATE
 SubFromEvents
 TASKEVENT, EVENTS
 SubFromSos
@@ -197,6 +197,12 @@ Exact filter strings (e.g. from/+/sync) live in the Domain DLL — not duplicate
 Downlink (service → device) — subscriptions
 $"to/{deviceId}/#"
 "config/#"
+
+Uplink (device → service) — also subscribed (so Outbound grid can listen live)
+$"from/{deviceId}/#"
+
+Received `from/…` messages are recorded as Outbound (not Inbound). Own publishes are recorded on publish and echo-deduped when the Node `-listen` client sees them again.
+
 Default publish topic on home page
 TabletTopicCatalog.ResolveUplinkKey(deviceId, "sync") → sync uplink topic
 
@@ -204,10 +210,22 @@ TabletTopicCatalog.ResolveUplinkKey(deviceId, "sync") → sync uplink topic
 Preset	Protobuf	Notes
 SyncFull
 SyncRequest
-Type = "FULL"
+Type = "FULL" (CONFIG → STATE → TASK → TUM_LIST)
 SyncConfig
 SyncRequest
 Type = "CONFIG"
+SyncState
+SyncRequest
+Type = "STATE"
+SyncTask
+SyncRequest
+Type = "TASK" (generated shiftId)
+SyncTumList
+SyncRequest
+Type = "TUM_LIST" (generated shiftId)
+SyncTumState
+SyncRequest
+Type = "TUM_STATE" (generated shiftId)
 Heartbeat
 DeviceHeartbeatPayload
 battery=85, network=wifi, appVersion=tablet-simulator
@@ -216,7 +234,7 @@ SosEvent
 deviceId, equipmentId, messageId, timestamp
 TaskEvent
 EventEnvelope + inner XxxPayload
-default TaskCreated (adHoc=true) with sample task fields; CreateTaskEventPreview decodes nested payload JSON
+default TaskCreated (adHoc=true) with sample task fields; also WorkplaceChecklistSubmitted (taskId + workplaceId required); CreateTaskEventPreview decodes nested payload JSON
 Ack
 AckMessage
 via PublishAckAsync(messageId)
@@ -308,11 +326,11 @@ POST
 /api/encode
 { topic, json } — encode protobuf JSON via `MqttProtoEncoder` → `{ payloadHex, messageType, payloadLength }` (live hex preview)
 GET
-/api/presets/sync-full
-Default Sync FULL for active device: `{ topic, json, payloadHex, messageType, deviceId, equipmentId }`
+/api/presets/sync
+SyncRequest for active device: `?type=FULL|CONFIG|STATE|TASK|TUM_LIST|TUM_STATE` (default FULL) → `{ topic, json, payloadHex, messageType, syncType, deviceId, equipmentId }`. `/api/presets/sync-full` is an alias.
 GET
 /api/presets/task-event
-Default task EventEnvelope for active device: `?eventType=TaskCreated` (etc.) → `{ topic, json, payloadHex, messageType, eventType, deviceId, equipmentId }` (JSON includes nested inner payload)
+Default task EventEnvelope for active device: `?eventType=TaskCreated` (or TaskAssigned, WorkplaceChecklistSubmitted, etc.) → `{ topic, json, payloadHex, messageType, eventType, deviceId, equipmentId }` (JSON includes nested inner payload)
 GET
 /api/inbound
 Recent inbound messages (server memory/SQLite; default limit 2000)
@@ -330,12 +348,12 @@ DELETE
 Clear outbound history
 GET
 /api/events
-SSE stream: unnamed = inbound live messages (summary truncated, no hex); `event: mqttLog` / `event: session` for lifecycle (no inbound history dump on connect)
+SSE stream: unnamed = inbound live messages (summary truncated, no hex); `event: outbound` for uplink (device→service) live rows; `event: mqttLog` / `event: session` for lifecycle (no inbound history dump on connect)
 POST
 /api/publish
 { topic, payload? } or { topic, preset? } — payload may be hex, file, or JSON (JSON encoded via MqttProtoEncoder); response includes `{ ok, outbound }` row metadata
 Publish presets (API)
-SYNC, SYNC-FULL, SYNC-CONFIG, HEARTBEAT, TELEMETRY, SOS, TASKEVENT
+SYNC, SYNC-FULL, SYNC-CONFIG, SYNC-STATE, SYNC-TASK, SYNC-TUM-LIST, SYNC-TUM-STATE, HEARTBEAT, TELEMETRY, SOS, TASKEVENT
 
 10. Key Source Files
 File	Responsibility
@@ -419,9 +437,9 @@ Device/equipment ID display
 Environment selector + Connect/Disconnect/Close all MQTT + auto-dispose (default 1 hour)
 Global MQTT log + last connection attempt panel
 Inbound table (service → device): SSE live updates, search, event type column, view decoded log / hex payload, export JSON, clear; visible cap 500 rows; after Sync FULL polls `/api/inbound` for ~25s so burst replies are not missed; light localStorage (no hex)
-Times shown in IST (Asia/Kolkata)
-Publish section (Sync | Task tabs): Sync tab — Sync FULL JSON editor + Heartbeat; Task tab — event-type dropdown + EventEnvelope JSON editor (nested payload) + Load preset / Publish; both auto-encode hex via `/api/encode`
-Outbound table (device → service): same columns as Inbound; populated on successful publish; SQLite `outbound_messages` + light localStorage; search / refresh / export / clear / view log+hex
+Times shown in IST (Asia/Kolkata). View log **Show times** converts payload unix epochs (`timestamp`, `eventTime`, etc.) to UTC + IST above the JSON
+Publish section (Sync | Task tabs): Sync tab — SyncRequest JSON editor + Sync FULL / CONFIG / STATE / TASK / TUM_LIST / TUM_STATE (DSS order CONFIG → STATE → TASK → TUM_LIST) + Heartbeat; Task tab — event-type dropdown + EventEnvelope JSON editor (nested payload) + Load preset / Publish; both auto-encode hex via `/api/encode`
+Outbound table (device → service): same columns as Inbound; populated on successful publish **and** when MQTT uplink on `from/{deviceId}/#` is received (live via SSE `event: outbound`); SQLite `outbound_messages` + light localStorage; search / refresh / export / clear / view log+hex
 Settings (settings.html)
 Multi-environment CRUD (add/delete)
 Active device ID (read-only; managed on Devices page) / Equipment ID editable
@@ -460,6 +478,8 @@ Connection timeout
 20–25s
 SSE keepalive ping
 every 15s
+SSE dead-client writes
+Caught (`HttpListenerException` / `IOException` / `ObjectDisposedException`); writer removed — does not crash process
 Auto-dispose MQTT
 1 hour after connect (default; configurable; disable via UI)
 Startup MQTT connect failure is non-fatal — app still launches web UI with message to fix settings.
@@ -482,6 +502,8 @@ NuGet restore fails
 Authenticate to Azure DevOps IRHTechnology feed
 BGT.DigiMine.Grpc.Shared mismatch
 Align version in Directory.Packages.props with DSS repo
+HttpListenerException 1229 / crash on MQTT log SSE
+Fixed: closed EventSource clients are dropped instead of crashing; rebuild/restart simulator
 17. Integration Context
 This simulator is a standalone tool extracted from / alongside DeviceSyncService. It does NOT host DSS APIs or Kafka — it only:
 
@@ -534,6 +556,13 @@ Shared DLLs from lib/ (DSS Domain + ProtoDecoder). See PROJECT_SNAPSHOT.md.
 
 | Date & time (UTC) | Change |
 |-------------------|--------|
+| 2026-08-19 07:45 UTC | Task tab: **WorkplaceChecklistSubmitted** preset (same EventEnvelope path as other task events). |
+| 2026-08-18 10:43 UTC | Home Sync tab: **Sync TUM_LIST** and **Sync TUM_STATE**; buttons ordered CONFIG → STATE → TASK → TUM_LIST (plus FULL / TUM_STATE). |
+| 2026-08-18 10:40 UTC | Home Sync tab: added **Sync STATE**, **Sync CONFIG**, and **Sync TASK** beside Sync FULL (`GET /api/presets/sync?type=`). |
+| 2026-08-17 14:50 UTC | View log **Show times** converts payload unix epoch fields to UTC + IST above the decoded JSON. |
+| 2026-08-13 05:27 UTC | Outbound grid sorts newest-first (latest at top), matching Inbound. |
+| 2026-08-12 13:45 UTC | Outbound grid now **listens** to uplink `from/{deviceId}/#` (plus existing downlink subscriptions). Device-side TaskCreated / Sync / etc. appear live via SSE `event: outbound`; own publishes echo-deduped for Node bridge. |
+| 2026-08-12 13:35 UTC | SSE broadcast no longer crashes the process when a browser tab closes: catch `HttpListenerException` / `ObjectDisposedException` (not only `IOException`) in `BroadcastSseRaw` and the `/api/events` keepalive ping, then drop dead writers. |
 | 2026-08-11 | Home Publish: Sync \| Task tabs; Task tab edits EventEnvelope JSON (nested payload) via `/api/presets/task-event` + encode/publish. Outbound (device → service) grid mirrors Inbound columns; SQLite `outbound_messages`; `GET/DELETE /api/outbound`; publish response includes `outbound` row. Rich TaskCreated (ad-hoc) presets in TabletPayloadFactory. |
 | 2026-07-29 | Inbound table: Refresh button reloads all from SQLite; fixed incremental-render race that could show only one row; lighter localStorage cache (truncated summaries). |
 | 2026-07-29 | Fixed Node bridge clientId collision: listen/publish used same `environment.ClientId`, so Sync FULL publish kicked the listener and downlink never arrived. Handlers now attach before subscribe-ready; Global MQTT log shows each inbound receipt; UI shows subscription READY + confirmed topics. |

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tablet</title>
+  <link rel="stylesheet" href="/tablet-lite.css">
+</head>
+<body class="tl-page">
+  <div class="tl-shell tl-shell-page">
+    <aside class="tl-sidebar" aria-label="Navigation">
+      <button type="button" class="tl-nav-item" tabindex="-1"><span class="tl-ico">⏱</span>Hour Meter</button>
+      <button type="button" class="tl-nav-item" tabindex="-1"><span class="tl-ico">☑</span>Checklist Log</button>
+      <button type="button" class="tl-nav-item active" tabindex="-1"><span class="tl-ico">📋</span>Tasks</button>
+      <button type="button" class="tl-nav-item" tabindex="-1"><span class="tl-ico">📈</span>Tum Log</button>
+      <button type="button" class="tl-nav-item" tabindex="-1"><span class="tl-ico">👤</span>Profile</button>
+      <button type="button" class="tl-nav-item" tabindex="-1"><span class="tl-ico">⚙</span>Admin Settings</button>
+      <div class="tl-nav-spacer"></div>
+      <button type="button" class="tl-nav-item" tabindex="-1"><span class="tl-ico">⎋</span>Log Out</button>
+    </aside>
+    <div class="tl-main">
+      <header class="tl-topbar">
+        <div class="tl-top-left">
+          <div class="tl-equip-icon">⛏</div>
+          <div>
+            <div class="tl-equip-name" id="tlEquipName">EQUIPMENT</div>
+            <div class="tl-mine-clock" id="tlMineClock">Mine day: —</div>
+          </div>
+          <span class="tl-badge-ready">Ready to Operate</span>
+          <span class="tl-ou-chip" id="tlOuChip" title="">OU —</span>
+        </div>
+        <div class="tl-top-actions">
+          <span class="tl-chip-btn">Change TUM States</span>
+          <span class="tl-sos">Send SOS</span>
+          <button type="button" class="tl-close-sim" id="tlCloseSim">Close</button>
+        </div>
+      </header>
+      <div class="tl-body">
+        <section class="tl-content">
+          <div id="tlListView">
+            <div class="tl-content-header">
+              <div>
+                <h2>Assigned Tasks</h2>
+                <p class="tl-shift" id="tlShiftLabel">Shift</p>
+              </div>
+              <button type="button" class="tl-adhoc-btn" id="tlAdHocBtn">+ Ad-Hoc Task</button>
+            </div>
+            <p class="tl-status-line" id="tlStatus"></p>
+            <p class="tl-ou-hint muted" id="tlOuHint">Catalog uses DigiMine OU from Settings; create uses equipment OU from the backend.</p>
+            <div class="tl-empty" id="tlEmpty">
+              <div class="tl-empty-ico">📋</div>
+              <h3>No Tasks Assigned</h3>
+              <p>You Don't Have Any Tasks Assigned For This Shift. Check Back Later Or Create An Ad-Hoc Task To Get Started.</p>
+            </div>
+            <div class="tl-task-list" id="tlTaskList" hidden></div>
+          </div>
+
+          <div id="tlDetailView" hidden>
+            <div class="tl-content-header">
+              <div>
+                <button type="button" class="tl-back-btn" id="tlBackToList">← Back</button>
+                <h2>Task Details</h2>
+                <p class="tl-shift" id="tlDetailSubtitle">Overview</p>
+              </div>
+            </div>
+            <div class="tl-detail-grid" id="tlDetailBody"></div>
+          </div>
+        </section>
+        <aside class="tl-rail" aria-label="Task actions">
+          <button type="button" class="tl-rail-btn" disabled>▶ Start</button>
+          <button type="button" class="tl-rail-btn" disabled>❚❚ Pause</button>
+          <button type="button" class="tl-rail-btn" disabled>⛓ Unassign</button>
+          <button type="button" class="tl-rail-btn" disabled>✓ Complete</button>
+          <button type="button" class="tl-rail-btn wide" disabled>Workplace Checklist</button>
+        </aside>
+      </div>
+    </div>
+
+    <div class="tl-adhoc-overlay" id="tlAdHocOverlay">
+      <div class="tl-adhoc-dialog" role="dialog" aria-labelledby="tlAdHocTitle">
+        <div class="tl-adhoc-header">
+          <h3 id="tlAdHocTitle">Ad Hoc Task</h3>
+          <button type="button" class="tl-adhoc-x" id="tlAdHocClose" aria-label="Close">×</button>
+        </div>
+        <div class="tl-adhoc-body">
+          <div class="tl-field">
+            <label for="tlTaskType">Task Type</label>
+            <select id="tlTaskType"></select>
+          </div>
+          <div class="tl-field">
+            <label for="tlQuantity">Quantity</label>
+            <input id="tlQuantity" type="number" min="0" step="any" placeholder="Enter Quantity">
+          </div>
+          <div class="tl-field">
+            <label for="tlWorkplace">Workplace</label>
+            <select id="tlWorkplace"></select>
+          </div>
+          <div class="tl-field">
+            <label for="tlExpectedStartDate">Expected Start Date</label>
+            <input id="tlExpectedStartDate" type="date">
+          </div>
+          <div class="tl-field">
+            <label for="tlPlannedEquipment">Planned Equipment</label>
+            <input id="tlPlannedEquipment" type="text" disabled>
+          </div>
+          <div class="tl-field">
+            <label for="tlStartTime">Estimated Start Time</label>
+            <input id="tlStartTime" type="time" step="60">
+            <p class="tl-field-hint">Mine local time (e.g. Abu Dhabi) — must be inside current shift.</p>
+          </div>
+          <div class="tl-field">
+            <label for="tlMaterial">Material</label>
+            <select id="tlMaterial"></select>
+          </div>
+          <div class="tl-field">
+            <label for="tlEndTime">Estimated End Time</label>
+            <input id="tlEndTime" type="time" step="60">
+            <p class="tl-field-hint">Mine local time (e.g. Abu Dhabi) — must be inside current shift.</p>
+          </div>
+          <div class="tl-field" id="tlDestinationField" hidden>
+            <label for="tlDestination">Allowed Destination</label>
+            <select id="tlDestination"></select>
+          </div>
+          <div class="tl-field">
+            <label for="tlDeadline">Deadline (Optional)</label>
+            <div class="tl-field-deadline">
+              <input id="tlDeadline" type="number" min="0" max="23.99" step="0.25" placeholder="Enter Deadline">
+              <span class="tl-hours">Hours</span>
+            </div>
+          </div>
+          <p class="tl-form-error" id="tlFormError"></p>
+        </div>
+        <div class="tl-adhoc-footer">
+          <button type="button" class="tl-btn-cancel" id="tlAdHocCancel">Cancel</button>
+          <button type="button" class="tl-btn-create" id="tlCreateTask" disabled>Create Task</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="/tablet-lite.js"></script>
+</body>
+</html>

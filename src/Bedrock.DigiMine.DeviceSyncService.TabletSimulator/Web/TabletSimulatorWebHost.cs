@@ -36,6 +36,7 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
     {
         _context = context;
         _context.MqttClient.InboundReceived += OnInbound;
+        _context.MqttClient.OutboundReceived += OnOutbound;
         _context.MqttClient.SessionChanged += OnSessionChanged;
         _context.MqttActivityLog.EntryAdded += OnMqttLogEntry;
     }
@@ -63,6 +64,7 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         _context.MqttClient.InboundReceived -= OnInbound;
+        _context.MqttClient.OutboundReceived -= OnOutbound;
         _context.MqttClient.SessionChanged -= OnSessionChanged;
         _context.MqttActivityLog.EntryAdded -= OnMqttLogEntry;
         if (_cts is not null)
@@ -86,6 +88,8 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
 
     private void OnInbound(object? sender, TabletInboundMessageEventArgs e) => BroadcastInbound(e.Message);
 
+    private void OnOutbound(object? sender, TabletInboundMessageEventArgs e) => BroadcastOutbound(e.Message);
+
     private void OnSessionChanged(object? sender, EventArgs e) => BroadcastSseEvent("session", SerializeSession());
 
     private void OnMqttLogEntry(object? sender, MqttActivityLogEntry entry) =>
@@ -97,6 +101,9 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
         // Omit payloadHex (can be huge during FULL sync) — UI loads it from SQLite on demand.
         BroadcastSseRaw($"data: {SerializeInboundLive(message)}\n\n");
     }
+
+    private void BroadcastOutbound(TabletInboundMessage message) =>
+        BroadcastSseEvent("outbound", SerializeOutboundLive(message));
 
     private void BroadcastSseEvent(string eventName, string json) =>
         BroadcastSseRaw($"event: {eventName}\ndata: {json}\n\n");
@@ -113,9 +120,18 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                     writer.Write(payload);
                     writer.Flush();
                 }
-                catch (IOException)
+                catch (Exception ex) when (ex is IOException or HttpListenerException or ObjectDisposedException)
                 {
-                    _sseWriters[i].Dispose();
+                    // Client closed the EventSource (tab refresh/navigate) — drop the writer; do not crash.
+                    try
+                    {
+                        _sseWriters[i].Dispose();
+                    }
+                    catch
+                    {
+                        // Ignore dispose failures on already-dead connections.
+                    }
+
                     _sseWriters.RemoveAt(i);
                 }
             }
@@ -162,6 +178,24 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
             if (path == "/common.css")
             {
                 await ServeFileAsync(http, "common.css", "text/css").ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/tablet-lite.html")
+            {
+                await ServeFileAsync(http, "tablet-lite.html", "text/html").ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/tablet-lite.css")
+            {
+                await ServeFileAsync(http, "tablet-lite.css", "text/css").ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/tablet-lite.js")
+            {
+                await ServeFileAsync(http, "tablet-lite.js", "application/javascript").ConfigureAwait(false);
                 return;
             }
 
@@ -435,9 +469,9 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 return;
             }
 
-            if (path == "/api/presets/sync-full" && method == "GET")
+            if ((path == "/api/presets/sync" || path == "/api/presets/sync-full") && method == "GET")
             {
-                await HandleSyncFullPresetAsync(http).ConfigureAwait(false);
+                await HandleSyncPresetAsync(http).ConfigureAwait(false);
                 return;
             }
 
@@ -468,6 +502,30 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
             if (path == "/api/publish" && method == "POST")
             {
                 await HandlePublishAsync(http).ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/api/tablet/catalog" && method == "GET")
+            {
+                await HandleTabletCatalogAsync(http).ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/api/tablet/tasks" && method == "GET")
+            {
+                await HandleTabletTasksAsync(http).ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/api/tablet/adhoc-task" && method == "POST")
+            {
+                await HandleTabletAdHocTaskAsync(http).ConfigureAwait(false);
+                return;
+            }
+
+            if (path == "/api/tablet/session" && method == "DELETE")
+            {
+                await HandleTabletSessionClearAsync(http).ConfigureAwait(false);
                 return;
             }
 
@@ -684,6 +742,7 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
         try
         {
             await _context.MqttClient.DisconnectAllAsync("manual disconnect").ConfigureAwait(false);
+            _context.DeviceCatalog.Clear();
             await WriteJsonAsync(http, new
             {
                 ok = true,
@@ -691,9 +750,159 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 deviceId = _context.Config.Device.DeviceId,
                 equipmentId = _context.Config.Device.EquipmentId,
                 session = _context.MqttClient.GetSessionSnapshot(),
+                tabletSessionCleared = true,
             }).ConfigureAwait(false);
         }
         catch (Exception ex)
+        {
+            http.Response.StatusCode = 400;
+            await WriteJsonAsync(http, new { error = ex.Message }).ConfigureAwait(false);
+        }
+    }
+
+    private async Task HandleTabletCatalogAsync(HttpListenerContext http)
+    {
+        var ouId = (_context.Config.DigiMine?.OperationalUnitId ?? string.Empty).Trim();
+        _context.DeviceCatalog.EnsureDevice(
+            _context.Config.Device.DeviceId,
+            _context.Config.Device.EquipmentId);
+        _context.DeviceCatalog.SetActiveOuId(ouId);
+        var snapshot = _context.DeviceCatalog.GetSnapshot();
+        await WriteJsonAsync(http, new
+        {
+            connected = _context.MqttClient.IsConnected,
+            ready = snapshot.IsReady,
+            ouId = snapshot.OuId,
+            ouConfigured = !string.IsNullOrWhiteSpace(ouId),
+            mineName = snapshot.MineName,
+            timeZone = snapshot.TimeZone,
+            deviceId = snapshot.DeviceId,
+            equipmentId = snapshot.EquipmentId,
+            equipment = snapshot.Equipment,
+            taskTypes = snapshot.TaskTypes,
+            workplaces = snapshot.Workplaces,
+            materials = snapshot.Materials,
+            materialLinks = snapshot.MaterialLinks,
+            shift = snapshot.Shift,
+        }).ConfigureAwait(false);
+    }
+
+    private async Task HandleTabletTasksAsync(HttpListenerContext http)
+    {
+        var tasks = _context.DeviceCatalog.GetTasks();
+        var shift = _context.DeviceCatalog.GetSnapshot().Shift;
+        await WriteJsonAsync(http, new
+        {
+            connected = _context.MqttClient.IsConnected,
+            shift,
+            tasks,
+        }).ConfigureAwait(false);
+    }
+
+    private async Task HandleTabletSessionClearAsync(HttpListenerContext http)
+    {
+        _context.DeviceCatalog.Clear();
+        await WriteJsonAsync(http, new { ok = true }).ConfigureAwait(false);
+    }
+
+    private async Task HandleTabletAdHocTaskAsync(HttpListenerContext http)
+    {
+        if (!_context.MqttClient.IsConnected)
+        {
+            http.Response.StatusCode = 400;
+            await WriteJsonAsync(http, new { error = "MQTT is not connected." }).ConfigureAwait(false);
+            return;
+        }
+
+        var body = await ReadBodyAsync(http).ConfigureAwait(false);
+        var request = JsonSerializer.Deserialize<AdHocTaskCreateRequest>(body, JsonOptions);
+        if (request is null)
+        {
+            http.Response.StatusCode = 400;
+            await WriteJsonAsync(http, new { error = "Invalid ad-hoc task body." }).ConfigureAwait(false);
+            return;
+        }
+
+        _context.DeviceCatalog.EnsureDevice(
+            _context.Config.Device.DeviceId,
+            _context.Config.Device.EquipmentId);
+        _context.DeviceCatalog.SetActiveOuId(_context.Config.DigiMine?.OperationalUnitId);
+        var catalog = _context.DeviceCatalog.GetSnapshot();
+        if (string.IsNullOrWhiteSpace(catalog.OuId))
+        {
+            http.Response.StatusCode = 400;
+            await WriteJsonAsync(http, new
+            {
+                error = "DigiMine Operational unit ID is not set. Configure it in Settings.",
+                ready = false,
+            }).ConfigureAwait(false);
+            return;
+        }
+
+        if (!catalog.IsReady)
+        {
+            http.Response.StatusCode = 400;
+            await WriteJsonAsync(http, new
+            {
+                error = "Catalog is not ready. Run Sync FULL and wait for CONFIG (task types + OU workplaces).",
+                ready = false,
+                ouId = catalog.OuId,
+            }).ConfigureAwait(false);
+            return;
+        }
+
+        try
+        {
+            var (topic, bytes, taskId, _) = TabletPayloadFactory.CreateAdHocTaskCreated(
+                _context.Config.Device,
+                request,
+                catalog);
+            var outbound = await _context.MqttClient
+                .PublishAsync(topic, bytes, retain: false)
+                .ConfigureAwait(false);
+
+            var taskType = catalog.TaskTypes.First(t =>
+                string.Equals(t.Id, request.TaskTypeId, StringComparison.OrdinalIgnoreCase));
+            var workplace = catalog.Workplaces.First(w =>
+                string.Equals(w.Id, request.WorkplaceId, StringComparison.OrdinalIgnoreCase));
+            var material = catalog.Materials.First(m =>
+                string.Equals(m.Id, request.MaterialId, StringComparison.OrdinalIgnoreCase));
+            _ = double.TryParse(
+                request.Quantity,
+                System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var quantity);
+
+            var card = new CatalogTaskCard
+            {
+                TaskId = taskId,
+                TaskTypeId = taskType.Id,
+                TaskTypeName = taskType.Name,
+                WorkplaceId = workplace.Id,
+                WorkplaceName = workplace.Name,
+                MaterialId = material.Id,
+                MaterialName = material.Name,
+                PlannedQuantity = quantity,
+                UnitOfMeasure = taskType.MeasurementUnits,
+                EstimatedStartTime = request.EstimatedStartTime,
+                EstimatedEndTime = request.EstimatedEndTime,
+                ExpectedStartDate = request.ExpectedStartDate,
+                Status = "Assigned",
+                IsAdHoc = true,
+                PrimaryEquipmentName = catalog.Equipment?.Name ?? catalog.EquipmentId,
+            };
+            _context.DeviceCatalog.UpsertLocalTask(card);
+
+            await WriteJsonAsync(http, new
+            {
+                ok = true,
+                taskId,
+                topic,
+                task = card,
+                outbound = ToOutboundDto(outbound),
+            }).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or FormatException or ArgumentException)
         {
             http.Response.StatusCode = 400;
             await WriteJsonAsync(http, new { error = ex.Message }).ConfigureAwait(false);
@@ -718,11 +927,13 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
         try
         {
             await _context.MqttClient.DisconnectAllAsync("disconnect-all from UI").ConfigureAwait(false);
+            _context.DeviceCatalog.Clear();
             await WriteJsonAsync(http, new
             {
                 ok = true,
                 connected = false,
                 session = _context.MqttClient.GetSessionSnapshot(),
+                tabletSessionCleared = true,
             }).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -1335,6 +1546,10 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
         catch (OperationCanceledException)
         {
         }
+        catch (Exception ex) when (ex is IOException or HttpListenerException or ObjectDisposedException)
+        {
+            // Browser closed /events — exit the keepalive loop quietly.
+        }
         finally
         {
             lock (_sseLock)
@@ -1342,8 +1557,22 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 _sseWriters.Remove(writer);
             }
 
-            await writer.DisposeAsync().ConfigureAwait(false);
-            http.Response.Close();
+            try
+            {
+                await writer.DisposeAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                // Already closed by the client.
+            }
+
+            try
+            {
+                http.Response.Close();
+            }
+            catch (HttpListenerException)
+            {
+            }
         }
     }
 
@@ -1373,6 +1602,10 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 {
                     "SYNC" or "SYNC-FULL" => UplinkPreset.SyncFull,
                     "SYNC-CONFIG" => UplinkPreset.SyncConfig,
+                    "SYNC-STATE" => UplinkPreset.SyncState,
+                    "SYNC-TASK" => UplinkPreset.SyncTask,
+                    "SYNC-TUM-LIST" or "SYNC-TUM_LIST" => UplinkPreset.SyncTumList,
+                    "SYNC-TUM-STATE" or "SYNC-TUM_STATE" => UplinkPreset.SyncTumState,
                     "HEARTBEAT" or "TELEMETRY" => UplinkPreset.Heartbeat,
                     "SOS" => UplinkPreset.Sos,
                     "TASKEVENT" => UplinkPreset.TaskEvent,
@@ -1574,12 +1807,13 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
         }
     }
 
-    private async Task HandleSyncFullPresetAsync(HttpListenerContext http)
+    private async Task HandleSyncPresetAsync(HttpListenerContext http)
     {
         try
         {
-            var (topic, json, payloadHex, messageType) =
-                TabletPayloadFactory.CreateSyncFullPreview(_context.Config.Device);
+            var syncType = http.Request.QueryString["type"];
+            var (topic, json, payloadHex, messageType, resolvedType) =
+                TabletPayloadFactory.CreateSyncPreview(_context.Config.Device, syncType);
             await WriteJsonAsync(http, new
             {
                 ok = true,
@@ -1587,11 +1821,12 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 json,
                 payloadHex,
                 messageType,
+                syncType = resolvedType,
                 deviceId = _context.Config.Device.DeviceId,
                 equipmentId = _context.Config.Device.EquipmentId,
             }).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is InvalidOperationException or InvalidProtocolBufferException)
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or InvalidProtocolBufferException)
         {
             http.Response.StatusCode = 400;
             await WriteJsonAsync(http, new { error = ex.Message }).ConfigureAwait(false);
@@ -1707,6 +1942,31 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
             message.Retained,
             decodedSummary = summary,
             // Hex stays in SQLite — fetch via GET /api/inbound/{sequence} when viewing encoded.
+            payloadHex = string.Empty,
+            eventType = message.EventType,
+            equipmentId = message.EquipmentId,
+        }, SseJsonOptions);
+    }
+
+    private static string SerializeOutboundLive(TabletInboundMessage message)
+    {
+        const int maxSummaryChars = 4000;
+        var summary = message.DecodedSummary ?? string.Empty;
+        if (summary.Length > maxSummaryChars)
+        {
+            summary = summary[..maxSummaryChars] + "\n…(truncated for live SSE; open View log for full decode)";
+        }
+
+        var at = message.ReceivedAt.ToString("O");
+        return JsonSerializer.Serialize(new
+        {
+            message.Sequence,
+            publishedAt = at,
+            receivedAt = at,
+            message.Topic,
+            message.PayloadLength,
+            message.Retained,
+            decodedSummary = summary,
             payloadHex = string.Empty,
             eventType = message.EventType,
             equipmentId = message.EquipmentId,

@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <title>Tablet Simulator</title>
 <link rel="stylesheet" href="/common.css">
+<link rel="stylesheet" href="/tablet-lite.css">
 </head>
 <body>
 <nav>
@@ -39,8 +40,10 @@
   <button type="button" class="btn btn-primary" id="connect">Connect</button>
   <button type="button" class="btn btn-danger" id="disconnect">Disconnect</button>
   <button type="button" class="btn btn-danger" id="disconnectAll">Close all MQTT</button>
+  <button type="button" class="btn btn-primary btn-tablet-open" id="openTablet" disabled title="Connect MQTT first">Open Tablet</button>
   <span id="connStatus" class="badge">disconnected</span>
 </div>
+<p class="muted" style="margin-top:-4px;">Open Tablet opens a separate window. Catalog workplaces/shifts use DigiMine <strong>Operational unit ID</strong> from Settings; Ad-Hoc create uses the equipment’s OU from the backend — keep them the same.</p>
 <div class="row mqtt-session-bar">
   <label class="inline-check"><input type="checkbox" id="autoDisposeEnabled" checked> Auto-close MQTT after</label>
   <input type="number" id="autoDisposeMinutes" min="1" max="1440" value="60" style="min-width:80px;width:80px;">
@@ -94,11 +97,13 @@
     <p class="view-meta"><strong id="viewTopic"></strong></p>
     <p class="view-meta muted" id="viewTime"></p>
     <p class="view-meta muted" id="viewPosition"></p>
+    <div id="viewTimestamps" class="view-timestamps" hidden></div>
   </div>
   <pre id="viewContent"></pre>
   <p class="view-dialog-actions">
     <button type="button" class="btn" id="viewPrev">Previous</button>
     <button type="button" class="btn" id="viewNext">Next</button>
+    <button type="button" class="btn" id="viewShowTimes" hidden aria-pressed="false">Show times</button>
     <button type="button" class="btn" id="viewClose">Close</button>
   </p>
 </dialog>
@@ -116,12 +121,17 @@
     <textarea id="payloadJson" class="payload-json" rows="12" spellcheck="false" placeholder="Edit SyncRequest JSON — auto-encodes to hex below"></textarea>
     </label></p>
     <p class="form-group"><label>Payload (hex or JSON)<br><input type="text" id="payload" size="80" placeholder="hex… or paste protobuf JSON to encode"></label></p>
-    <p class="muted">Edit JSON above to auto-sync hex via ProtoDecoder (<code>MqttProtoEncoder</code>). <strong>Sync FULL</strong> loads the default SyncRequest for the active device/equipment and publishes it. Replies appear under Inbound; this uplink is listed under Outbound.</p>
+    <p class="muted">Edit JSON above to auto-sync hex via ProtoDecoder (<code>MqttProtoEncoder</code>). Sync buttons load a <code>SyncRequest</code> and publish it. DSS push order is CONFIG → STATE → TASK → TUM_LIST. Replies appear under Inbound; this uplink is listed under Outbound.</p>
     <p id="payloadSyncStatus" class="muted"></p>
     <p><label><input type="checkbox" id="retain"> retain</label></p>
     <p>
     <button type="button" class="btn btn-primary" id="publish">Publish</button>
-    <button type="button" class="btn" id="loadSyncFull">Sync FULL</button>
+    <button type="button" class="btn" id="loadSyncFull" data-sync-type="FULL">Sync FULL</button>
+    <button type="button" class="btn" id="loadSyncConfig" data-sync-type="CONFIG">Sync CONFIG</button>
+    <button type="button" class="btn" id="loadSyncState" data-sync-type="STATE">Sync STATE</button>
+    <button type="button" class="btn" id="loadSyncTask" data-sync-type="TASK">Sync TASK</button>
+    <button type="button" class="btn" id="loadSyncTumList" data-sync-type="TUM_LIST">Sync TUM_LIST</button>
+    <button type="button" class="btn" id="loadSyncTumState" data-sync-type="TUM_STATE">Sync TUM_STATE</button>
     <button type="button" class="btn" data-preset="heartbeat">Heartbeat</button>
     </p>
     <p id="publishStatus" class="muted"></p>
@@ -138,6 +148,7 @@
         <option value="TaskUnassigned">TaskUnassigned</option>
         <option value="TaskOperatorUnassigned">TaskOperatorUnassigned</option>
         <option value="NoteCreated">NoteCreated</option>
+        <option value="WorkplaceChecklistSubmitted">WorkplaceChecklistSubmitted</option>
       </select>
     </label></p>
     <p class="form-group"><label>Topic<br><input type="text" id="taskTopic" size="80"></label></p>
@@ -157,7 +168,7 @@
 </div>
 
 <h2>Outbound (device → service)</h2>
-<p class="muted">Shows uplink messages published from this simulator (Sync, Heartbeat, Task, etc.).</p>
+<p class="muted">Shows uplink messages on <code>from/{deviceId}/#</code> — publishes from this simulator and live listens when the device (or another client) publishes TaskCreated / Sync / Heartbeat / etc.</p>
 <div class="row inbound-toolbar">
   <div class="form-group" style="flex:1; min-width:240px; margin-bottom:0;">
     <label for="outboundSearch">Search</label>
@@ -219,9 +230,11 @@ const viewTitle = document.getElementById('viewTitle');
 const viewTopic = document.getElementById('viewTopic');
 const viewTime = document.getElementById('viewTime');
 const viewPosition = document.getElementById('viewPosition');
+const viewTimestamps = document.getElementById('viewTimestamps');
 const viewContent = document.getElementById('viewContent');
 const viewPrev = document.getElementById('viewPrev');
 const viewNext = document.getElementById('viewNext');
+const viewShowTimesBtn = document.getElementById('viewShowTimes');
 const mqttGlobalLog = document.getElementById('mqttGlobalLog');
 const mqttLogCount = document.getElementById('mqttLogCount');
 const autoDisposeEnabled = document.getElementById('autoDisposeEnabled');
@@ -237,6 +250,7 @@ let outboundMsgId = 0;
 let searchQuery = '';
 let outboundSearchQuery = '';
 let viewNav = { entries: [], index: -1, mode: 'log', source: 'inbound' };
+let viewShowTimes = false;
 let persistTimer = null;
 let outboundPersistTimer = null;
 let renderScheduled = false;
@@ -251,8 +265,7 @@ const MAX_MQTT_LOG_LINES = 400;
 let inboundBurstTimer = null;
 let inboundBurstUntil = 0;
 
-const istFormatter = new Intl.DateTimeFormat('en-IN', {
-  timeZone: 'Asia/Kolkata',
+const timeFormatOpts = {
   year: 'numeric',
   month: '2-digit',
   day: '2-digit',
@@ -260,15 +273,83 @@ const istFormatter = new Intl.DateTimeFormat('en-IN', {
   minute: '2-digit',
   second: '2-digit',
   hour12: false,
-});
+};
+const istFormatter = new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', ...timeFormatOpts });
+const utcFormatter = new Intl.DateTimeFormat('en-IN', { timeZone: 'UTC', ...timeFormatOpts });
+const TIMESTAMP_FIELD_RE = /timestamp|eventTime|createdAt|updatedAt|deadline|time$/i;
+const TIMESTAMP_PAIR_RE = /(?:"([^"\\]+)"|(\b[A-Za-z_][\w.]*))\s*:\s*"?(\d{9,16})"?/g;
 
 function inboundDedupeKey(msg) {
   const seq = msg.sequence;
   return seq != null && seq > 0 ? String(seq) : null;
 }
 
+function formatClock(formatter, value) {
+  const date = value instanceof Date ? value : new Date(value);
+  return formatter.format(date).replace(/\//g, '-');
+}
+
 function formatTimeIst(iso) {
-  return istFormatter.format(new Date(iso)).replace(/\//g, '-');
+  return formatClock(istFormatter, iso);
+}
+
+function formatTimeUtc(date) {
+  return formatClock(utcFormatter, date);
+}
+
+function parseUnixEpoch(value) {
+  const n = typeof value === 'number' ? value : Number(String(value).trim());
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n >= 1e12 && n <= 2e13) return new Date(n);
+  if (n >= 1e9 && n <= 2e10) return new Date(n * 1000);
+  return null;
+}
+
+function extractTimestampFields(text) {
+  if (!text) return [];
+  const results = [];
+  const seen = new Set();
+  TIMESTAMP_PAIR_RE.lastIndex = 0;
+  let match;
+  while ((match = TIMESTAMP_PAIR_RE.exec(text)) !== null) {
+    const name = match[1] || match[2];
+    const raw = match[3];
+    if (!name || !TIMESTAMP_FIELD_RE.test(name)) continue;
+    const date = parseUnixEpoch(raw);
+    if (!date || Number.isNaN(date.getTime())) continue;
+    const key = `${name}:${raw}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    results.push({ name, raw, date });
+  }
+  return results;
+}
+
+function updateShowTimesButton() {
+  viewShowTimesBtn.textContent = viewShowTimes ? 'Hide times' : 'Show times';
+  viewShowTimesBtn.setAttribute('aria-pressed', viewShowTimes ? 'true' : 'false');
+}
+
+function hideTimestampPanel() {
+  viewTimestamps.hidden = true;
+  viewTimestamps.textContent = '';
+}
+
+function renderTimestampPanel(text) {
+  updateShowTimesButton();
+  if (!viewShowTimes) {
+    hideTimestampPanel();
+    return;
+  }
+  const fields = extractTimestampFields(text);
+  viewTimestamps.hidden = false;
+  if (!fields.length) {
+    viewTimestamps.textContent = 'No unix timestamps found';
+    return;
+  }
+  viewTimestamps.textContent = fields
+    .map(f => `${f.name}: ${f.raw} → UTC ${formatTimeUtc(f.date)} · IST ${formatTimeIst(f.date)}`)
+    .join('\n');
 }
 
 function normalizeMsg(msg) {
@@ -585,21 +666,29 @@ async function renderViewDialog() {
   viewPosition.textContent = `${index + 1} of ${entries.length}`;
   viewPrev.disabled = index <= 0;
   viewNext.disabled = index >= entries.length - 1;
+  updateShowTimesButton();
 
   if (mode !== 'log') {
+    viewShowTimesBtn.hidden = true;
+    hideTimestampPanel();
     viewContent.textContent = entry.msg.payloadHex || '(empty — reload from server if missing)';
     return;
   }
 
+  viewShowTimesBtn.hidden = false;
+
   const hex = (entry.msg.payloadHex || '').trim();
   const topicVal = entry.msg.topic || '';
   if (!hex || !topicVal) {
-    viewContent.textContent = entry.msg.decodedSummary || '(empty)';
+    const summary = entry.msg.decodedSummary || '(empty)';
+    viewContent.textContent = summary;
+    renderTimestampPanel(summary);
     return;
   }
 
   const requestToken = `${entry.id}:${hex}`;
   viewContent.textContent = 'Re-decoding with current ProtoDecoder…';
+  hideTimestampPanel();
   viewNav.decodeToken = requestToken;
   try {
     const r = await fetch('/api/decode', {
@@ -610,12 +699,16 @@ async function renderViewDialog() {
     const j = await r.json();
     if (viewNav.decodeToken !== requestToken) return;
     if (!r.ok) {
-      viewContent.textContent =
+      const fallback =
         (entry.msg.decodedSummary || '(empty)') +
         `\n\n(Re-decode failed: ${j.error || r.status})`;
+      viewContent.textContent = fallback;
+      renderTimestampPanel(entry.msg.decodedSummary || '');
       return;
     }
-    viewContent.textContent = j.decodedSummary || entry.msg.decodedSummary || '(empty)';
+    const summary = j.decodedSummary || entry.msg.decodedSummary || '(empty)';
+    viewContent.textContent = summary;
+    renderTimestampPanel(summary);
     if (j.decodedSummary) {
       entry.msg.decodedSummary = j.decodedSummary;
       if (j.eventType) entry.msg.eventType = j.eventType;
@@ -625,9 +718,11 @@ async function renderViewDialog() {
     }
   } catch (e) {
     if (viewNav.decodeToken !== requestToken) return;
-    viewContent.textContent =
+    const fallback =
       (entry.msg.decodedSummary || '(empty)') +
       `\n\n(Re-decode failed: ${e.message})`;
+    viewContent.textContent = fallback;
+    renderTimestampPanel(entry.msg.decodedSummary || '');
   }
 }
 
@@ -654,6 +749,15 @@ inboundBody.onclick = e => {
 
 viewPrev.onclick = () => stepView(-1);
 viewNext.onclick = () => stepView(1);
+viewShowTimesBtn.onclick = () => {
+  viewShowTimes = !viewShowTimes;
+  updateShowTimesButton();
+  if (viewNav.mode !== 'log') {
+    hideTimestampPanel();
+    return;
+  }
+  renderTimestampPanel(viewContent.textContent || '');
+};
 document.getElementById('viewClose').onclick = () => viewDialog.close();
 viewDialog.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); stepView(-1); }
@@ -780,6 +884,9 @@ function updateConnectionUi(s) {
   }
   connStatus.textContent = s.connected ? 'connected' : 'disconnected';
   connStatus.className = 'badge ' + (s.connected ? 'badge-ok' : 'badge-err');
+  if (window.TabletLite) {
+    window.TabletLite.setConnected(!!s.connected);
+  }
   const bridge = s.usesNodeBridge ? ' | Node OpenSSL bridge' : '';
   status.textContent = `broker=${s.broker || '—'} | env=${s.environment || '—'}${bridge}`;
   if (typeof s.autoDisposeEnabled === 'boolean') {
@@ -821,6 +928,9 @@ function applySessionEvent(session) {
     environments: Array.from(environment.options).map(o => o.value),
     defaultTopic: topic.value,
   });
+  if (!session.connected && window.TabletLite) {
+    window.TabletLite.onDisconnect();
+  }
 }
 
 async function loadStatus() {
@@ -828,7 +938,7 @@ async function loadStatus() {
   updateConnectionUi(s);
   const deviceId = s.deviceId || '';
   if (!payloadJson.value.trim() || (deviceId && deviceId !== lastSyncFullDeviceId)) {
-    await loadSyncFullPreset({ silent: true });
+    await loadSyncPreset({ type: 'FULL', silent: true });
   }
   if (!taskPayloadJson.value.trim() || (deviceId && deviceId !== lastTaskPresetDeviceId)) {
     await loadTaskEventPreset({ silent: true });
@@ -845,15 +955,17 @@ function looksLikeJsonPayload(text) {
   return t.startsWith('{') || t.startsWith('[') || t.includes('Decoded payload:');
 }
 
-async function loadSyncFullPreset(options = {}) {
+async function loadSyncPreset(options = {}) {
   const silent = !!options.silent;
   const publishAfter = !!options.publish;
+  const type = String(options.type || 'FULL').toUpperCase();
+  const label = `Sync ${type}`;
   try {
-    if (!silent) publishStatus.textContent = publishAfter ? 'loading Sync FULL…' : 'loading Sync FULL…';
-    const r = await fetch('/api/presets/sync-full');
+    if (!silent) publishStatus.textContent = `loading ${label}…`;
+    const r = await fetch(`/api/presets/sync?type=${encodeURIComponent(type)}`);
     const j = await r.json();
     if (!r.ok) {
-      if (!silent) publishStatus.textContent = j.error || 'failed to load Sync FULL';
+      if (!silent) publishStatus.textContent = j.error || `failed to load ${label}`;
       payloadSyncStatus.textContent = j.error || 'preset failed';
       return false;
     }
@@ -865,15 +977,16 @@ async function loadSyncFullPreset(options = {}) {
     syncingFromJson = false;
     syncingFromHex = false;
     lastSyncFullDeviceId = j.deviceId || '';
+    const resolvedType = j.syncType || type;
     payloadSyncStatus.textContent = j.messageType
-      ? `Synced FULL (${j.messageType}, ${(j.payloadHex || '').length / 2} bytes)`
-      : 'Synced FULL loaded';
+      ? `Synced ${resolvedType} (${j.messageType}, ${(j.payloadHex || '').length / 2} bytes)`
+      : `Synced ${resolvedType} loaded`;
     if (!publishAfter) {
-      if (!silent) publishStatus.textContent = 'Sync FULL loaded — edit JSON if needed, then Publish';
+      if (!silent) publishStatus.textContent = `${label} loaded — edit JSON if needed, then Publish`;
       return true;
     }
 
-    publishStatus.textContent = 'publishing Sync FULL…';
+    publishStatus.textContent = `publishing ${label}…`;
     const pub = await fetch('/api/publish', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -889,12 +1002,12 @@ async function loadSyncFullPreset(options = {}) {
       return false;
     }
     publishStatus.textContent =
-      'Sync FULL published — watching Inbound for replies; uplink listed under Outbound';
+      `${label} published — watching Inbound for replies; uplink listed under Outbound`;
     if (pubJson.outbound) addOutboundRow(pubJson.outbound);
     startInboundBurstWatch(25000);
     return true;
   } catch (e) {
-    if (!silent) publishStatus.textContent = 'failed to load Sync FULL: ' + e.message;
+    if (!silent) publishStatus.textContent = `failed to load ${label}: ` + e.message;
     payloadSyncStatus.textContent = e.message;
     return false;
   }
@@ -1095,6 +1208,7 @@ document.getElementById('disconnect').onclick = async () => {
       connStatus.className = 'badge badge-err';
       return;
     }
+    if (window.TabletLite) window.TabletLite.onDisconnect();
     await loadStatus();
   } catch (e) {
     connStatus.textContent = 'failed';
@@ -1114,6 +1228,7 @@ document.getElementById('disconnectAll').onclick = async () => {
       connStatus.className = 'badge badge-err';
       return;
     }
+    if (window.TabletLite) window.TabletLite.onDisconnect();
     await loadStatus();
   } catch (e) {
     connStatus.textContent = 'failed';
@@ -1134,11 +1249,23 @@ loadMqttLog();
 const es = new EventSource('/api/events');
 es.onmessage = e => {
   try {
-    addInboundRow(JSON.parse(e.data));
+    const msg = JSON.parse(e.data);
+    addInboundRow(msg);
+    const topic = (msg.topic || '').toLowerCase();
+    if (window.TabletLite && (topic.includes('config/') || topic.includes('/taskevents'))) {
+      window.TabletLite.refresh();
+    }
   } catch (err) {
     console.error('Inbound SSE parse error:', err, e.data);
   }
 };
+es.addEventListener('outbound', e => {
+  try {
+    addOutboundRow(JSON.parse(e.data));
+  } catch (err) {
+    console.error('Outbound SSE parse error:', err, e.data);
+  }
+});
 es.addEventListener('mqttLog', e => {
   try {
     appendMqttLog(JSON.parse(e.data));
@@ -1178,7 +1305,9 @@ document.getElementById('publish').onclick = async () => {
   if (r.ok) noteOutboundFromPublish(j);
 };
 
-document.getElementById('loadSyncFull').onclick = () => loadSyncFullPreset({ publish: true });
+document.querySelectorAll('[data-sync-type]').forEach(btn => {
+  btn.onclick = () => loadSyncPreset({ type: btn.dataset.syncType, publish: true });
+});
 
 document.querySelectorAll('[data-preset]').forEach(btn => {
   btn.onclick = async () => {
@@ -1480,15 +1609,20 @@ function buildOutboundRow(entry) {
 
 function renderOutboundTable() {
   const filtered = getFilteredOutboundEntries();
-  const capped = filtered.length > VISIBLE_ROW_LIMIT;
-  const shownEntries = capped ? filtered.slice(filtered.length - VISIBLE_ROW_LIMIT) : filtered;
-  outboundBody.replaceChildren();
   const frag = document.createDocumentFragment();
-  for (const entry of shownEntries) {
-    frag.appendChild(buildOutboundRow(entry));
+  let shown = 0;
+  let capped = false;
+  // Newest first (same as Inbound).
+  for (let i = filtered.length - 1; i >= 0; i--) {
+    if (shown >= VISIBLE_ROW_LIMIT) {
+      capped = true;
+      break;
+    }
+    shown++;
+    frag.appendChild(buildOutboundRow(filtered[i]));
   }
-  outboundBody.appendChild(frag);
-  updateOutboundCount(shownEntries.length, filtered.length, capped);
+  outboundBody.replaceChildren(frag);
+  updateOutboundCount(shown, filtered.length, capped);
 }
 
 function scheduleRenderOutbound() {
@@ -1593,5 +1727,6 @@ document.getElementById('clearOutbound').onclick = async () => {
   }
 };
 </script>
+<script src="/tablet-lite.js"></script>
 </body>
 </html>

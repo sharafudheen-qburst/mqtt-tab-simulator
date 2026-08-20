@@ -16,7 +16,8 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
         InboundMessageStore inboundMessages,
         OutboundMessageStore outboundMessages,
         AppStorageStore appStorage,
-        DeviceStore devices)
+        DeviceStore devices,
+        DeviceCatalogStore deviceCatalog)
     {
         Config = config;
         ConfigStore = configStore;
@@ -27,6 +28,7 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
         OutboundMessages = outboundMessages;
         AppStorage = appStorage;
         Devices = devices;
+        DeviceCatalog = deviceCatalog;
     }
 
     public SimulatorConfig Config { get; }
@@ -38,6 +40,7 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
     public OutboundMessageStore OutboundMessages { get; }
     public AppStorageStore AppStorage { get; }
     public DeviceStore Devices { get; }
+    public DeviceCatalogStore DeviceCatalog { get; }
 
     public async ValueTask DisposeAsync()
     {
@@ -61,7 +64,10 @@ public static class TabletSimulatorDependencyInjection
         var devices = new DeviceStore(database);
         devices.SyncWithConfig(config);
         var mqttActivityLog = new MqttActivityLog();
-        var mqttClient = new TabletMqttClient(config, inboundMessages, outboundMessages, mqttActivityLog);
+        var deviceCatalog = new DeviceCatalogStore();
+        deviceCatalog.EnsureDevice(config.Device.DeviceId, config.Device.EquipmentId);
+        deviceCatalog.SetActiveOuId(config.DigiMine?.OperationalUnitId);
+        var mqttClient = new TabletMqttClient(config, inboundMessages, outboundMessages, mqttActivityLog, deviceCatalog);
         return new TabletSimulatorContext(
             config,
             configStore,
@@ -71,6 +77,7 @@ public static class TabletSimulatorDependencyInjection
             inboundMessages,
             outboundMessages,
             appStorage,
-            devices);
+            devices,
+            deviceCatalog);
     }
 }

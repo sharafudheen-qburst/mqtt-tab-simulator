@@ -145,6 +145,23 @@ input[readonly] { background: #e9ecef; color: #495057; }
   cursor: not-allowed;
 }
 
+.view-timestamps {
+  margin: 8px 0 0;
+  padding: 0;
+  font-family: Consolas, ui-monospace, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  color: #6c757d;
+  max-height: 120px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+#viewShowTimes[aria-pressed="true"] {
+  background: #e9ecef;
+}
+
 #viewDialog,
 #certViewDialog {
   min-width: min(720px, 90vw);

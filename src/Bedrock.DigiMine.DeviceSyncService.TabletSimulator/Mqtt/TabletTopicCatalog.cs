@@ -23,6 +23,28 @@ public static class TabletTopicCatalog
         "config/#",
     ];
 
+    /// <summary>
+    /// Uplink filters so the simulator can observe device→service traffic
+    /// (including TaskCreated published by a real device or another client).
+    /// </summary>
+    public static IReadOnlyList<string> GetUplinkSubscriptionFilters(string deviceId) =>
+    [
+        $"from/{deviceId}/#",
+    ];
+
+    public static IReadOnlyList<string> GetAllSubscriptionFilters(string deviceId)
+    {
+        var downlink = GetDownlinkSubscriptionFilters(deviceId);
+        var uplink = GetUplinkSubscriptionFilters(deviceId);
+        var combined = new List<string>(downlink.Count + uplink.Count);
+        combined.AddRange(downlink);
+        combined.AddRange(uplink);
+        return combined;
+    }
+
+    public static bool IsUplinkTopic(string topic) =>
+        topic.StartsWith("from/", StringComparison.Ordinal);
+
     public static string ResolveUplinkKey(string deviceId, string keyOrTopic)
     {
         if (keyOrTopic.StartsWith("from/", StringComparison.Ordinal))
