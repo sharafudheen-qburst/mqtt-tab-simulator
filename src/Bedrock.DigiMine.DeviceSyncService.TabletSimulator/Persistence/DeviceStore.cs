@@ -107,8 +107,9 @@ public sealed class DeviceStore
     }
 
     /// <summary>
-    /// Seeds SQLite from config when empty; otherwise merges (keeps SQLite name when config name is blank),
-    /// then reloads the config device list from SQLite.
+    /// Uses SQLite as source of truth for devices.
+    /// When DB is empty, seed from config. When DB has rows, do not overwrite them from config;
+    /// only append config-only devices, then reload config devices from DB.
     /// </summary>
     public void SyncWithConfig(SimulatorConfig config)
     {
@@ -128,26 +129,16 @@ public sealed class DeviceStore
         }
         else
         {
+            config.MigrateEnvironmentCertificatesToDevices();
             foreach (var entry in config.Devices)
             {
-                if (fromDb.TryGetValue(entry.DeviceId, out var existing))
+                if (fromDb.ContainsKey(entry.DeviceId))
                 {
-                    if (string.IsNullOrWhiteSpace(entry.Name)
-                        && !string.IsNullOrWhiteSpace(existing.Name))
-                    {
-                        entry.Name = existing.Name;
-                    }
-
-                    if (string.IsNullOrWhiteSpace(entry.CertificateFolder)
-                        && !string.IsNullOrWhiteSpace(existing.CertificateFolder))
-                    {
-                        entry.CertificateFolder = existing.CertificateFolder;
-                    }
+                    continue;
                 }
-            }
 
-            config.MigrateEnvironmentCertificatesToDevices();
-            ReplaceAll(config.Devices);
+                Upsert(entry);
+            }
         }
 
         var loaded = ListAll();

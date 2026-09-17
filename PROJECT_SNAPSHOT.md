@@ -426,7 +426,7 @@ npm install in source NodeBridge/ (copied to output on build if node_modules exi
 Optional env: NODE_BINARY for custom node path
 12. Web UI Features
 Devices (devices.html) — landing at /
-List saved devices (SQLite `devices` table + mirrored in simulator-config.json)
+List saved devices (SQLite `devices` table + mirrored in simulator-config.json); device list shows equipment ID under device ID when set
 MQTT sessions panel (connected badge, broker, auto-close time) + Close all MQTT
 Global MQTT log (live via SSE `mqttLog`)
 Add device (device ID + optional name/details; equipment ID auto-generated)
@@ -440,6 +440,7 @@ Inbound table (service → device): SSE live updates, search, event type column,
 Times shown in IST (Asia/Kolkata). View log **Show times** converts payload unix epochs (`timestamp`, `eventTime`, etc.) to UTC + IST above the JSON
 Publish section (Sync | Task tabs): Sync tab — SyncRequest JSON editor + Sync FULL / CONFIG / STATE / TASK / TUM_LIST / TUM_STATE (DSS order CONFIG → STATE → TASK → TUM_LIST) + Heartbeat; Task tab — event-type dropdown + EventEnvelope JSON editor (nested payload) + Load preset / Publish; both auto-encode hex via `/api/encode`
 Outbound table (device → service): same columns as Inbound; populated on successful publish **and** when MQTT uplink on `from/{deviceId}/#` is received (live via SSE `event: outbound`); SQLite `outbound_messages` + light localStorage; search / refresh / export / clear / view log+hex
+Open Tablet (`tablet-lite.html`): top-bar **Time zone** dropdown — Abu Dhabi (default), IST, UTC; clock, Ad-Hoc date/start/end defaults, task list/detail times, and create publish conversion use the selected zone (sessionStorage). Ad-Hoc **Event Date/Time** sets envelope `eventTime`/`timestamp` and expected start; secondary hauling omits `estimatedEndTime`
 Settings (settings.html)
 Multi-environment CRUD (add/delete)
 Active device ID (read-only; managed on Devices page) / Equipment ID editable
@@ -486,7 +487,7 @@ Startup MQTT connect failure is non-fatal — app still launches web UI with mes
 
 15. Build Details (csproj)
 Copies simulator-config.json, www/**, NodeBridge/package.json, mqtt-bridge.js, README.md to output
-CopyNodeBridgeModules target copies node_modules to output after build
+CopyNodeBridgeModules target copies node_modules to build output; CopyNodeBridgeModulesToPublishDir copies to `dotnet publish` output when source `NodeBridge/node_modules` exists
 EnsureLibDlls fails build if Domain/ProtoDecoder DLLs missing
 16. Common Issues & Fixes
 Problem	Fix
@@ -556,6 +557,12 @@ Shared DLLs from lib/ (DSS Domain + ProtoDecoder). See PROJECT_SNAPSHOT.md.
 
 | Date & time (UTC) | Change |
 |-------------------|--------|
+| 2026-08-27 13:50 UTC | Publish output now copies `NodeBridge/node_modules` when present; README documents `npm install` for published instance folders missing deps. |
+| 2026-08-24 09:55 UTC | Ad-Hoc: Event Date/Time UI → envelope `eventTime`/`timestamp`; start date/time derived from it; secondary omits `estimatedEndTime`. |
+| 2026-08-24 07:55 UTC | Fixed tablet/catalog timezone normalization (`GMT+04:00 Asia/Dubai` → `Asia/Dubai`) so current shift selection and displayed shift hours follow the selected time zone correctly. |
+| 2026-08-24 05:45 UTC | Tablet popup: top-bar time zone dropdown (Abu Dhabi default, IST, UTC) drives clock, Ad-Hoc times, and task time display/create. |
+| 2026-08-24 05:35 UTC | OT Ad-Hoc Task popup: removed “times must be inside current shift” validation — any date/time is allowed. |
+| 2026-08-23 07:03 UTC | Devices listing shows equipment ID under device ID when available. |
 | 2026-08-19 07:45 UTC | Task tab: **WorkplaceChecklistSubmitted** preset (same EventEnvelope path as other task events). |
 | 2026-08-18 10:43 UTC | Home Sync tab: **Sync TUM_LIST** and **Sync TUM_STATE**; buttons ordered CONFIG → STATE → TASK → TUM_LIST (plus FULL / TUM_STATE). |
 | 2026-08-18 10:40 UTC | Home Sync tab: added **Sync STATE**, **Sync CONFIG**, and **Sync TASK** beside Sync FULL (`GET /api/presets/sync?type=`). |

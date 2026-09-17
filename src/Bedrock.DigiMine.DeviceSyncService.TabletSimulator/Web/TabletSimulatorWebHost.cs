@@ -779,6 +779,9 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
             deviceId = snapshot.DeviceId,
             equipmentId = snapshot.EquipmentId,
             equipment = snapshot.Equipment,
+            equipmentList = snapshot.EquipmentList,
+            isHaulingSecondaryEquipment = DeviceCatalogStore.IsHaulingSecondaryEquipment(snapshot.Equipment),
+            loaders = snapshot.EquipmentList,
             taskTypes = snapshot.TaskTypes,
             workplaces = snapshot.Workplaces,
             materials = snapshot.Materials,
@@ -861,11 +864,12 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 .PublishAsync(topic, bytes, retain: false)
                 .ConfigureAwait(false);
 
+            var isHaulingSecondary = !string.IsNullOrWhiteSpace(request.LoaderEquipmentId);
             var taskType = catalog.TaskTypes.First(t =>
                 string.Equals(t.Id, request.TaskTypeId, StringComparison.OrdinalIgnoreCase));
-            var workplace = catalog.Workplaces.First(w =>
+            var workplace = catalog.Workplaces.FirstOrDefault(w =>
                 string.Equals(w.Id, request.WorkplaceId, StringComparison.OrdinalIgnoreCase));
-            var material = catalog.Materials.First(m =>
+            var material = catalog.Materials.FirstOrDefault(m =>
                 string.Equals(m.Id, request.MaterialId, StringComparison.OrdinalIgnoreCase));
             _ = double.TryParse(
                 request.Quantity,
@@ -873,23 +877,40 @@ public sealed class TabletSimulatorWebHost : IAsyncDisposable
                 System.Globalization.CultureInfo.InvariantCulture,
                 out var quantity);
 
+            var loader = isHaulingSecondary
+                ? catalog.EquipmentList.FirstOrDefault(e =>
+                    string.Equals(e.Id, request.LoaderEquipmentId, StringComparison.OrdinalIgnoreCase))
+                : null;
+            var primaryName = loader?.Name
+                ?? catalog.Equipment?.Name
+                ?? catalog.EquipmentId;
+            var secondaryIds = isHaulingSecondary && !string.IsNullOrWhiteSpace(catalog.Equipment?.Id)
+                ? new List<string> { catalog.Equipment!.Id }
+                : new List<string>();
+            var secondaryNames = isHaulingSecondary
+                ? (catalog.Equipment?.Name ?? string.Empty)
+                : string.Empty;
+
             var card = new CatalogTaskCard
             {
                 TaskId = taskId,
                 TaskTypeId = taskType.Id,
                 TaskTypeName = taskType.Name,
-                WorkplaceId = workplace.Id,
-                WorkplaceName = workplace.Name,
-                MaterialId = material.Id,
-                MaterialName = material.Name,
+                WorkplaceId = workplace?.Id ?? string.Empty,
+                WorkplaceName = workplace?.Name ?? string.Empty,
+                MaterialId = material?.Id ?? string.Empty,
+                MaterialName = material?.Name ?? string.Empty,
                 PlannedQuantity = quantity,
                 UnitOfMeasure = taskType.MeasurementUnits,
                 EstimatedStartTime = request.EstimatedStartTime,
-                EstimatedEndTime = request.EstimatedEndTime,
+                EstimatedEndTime = isHaulingSecondary ? string.Empty : request.EstimatedEndTime,
                 ExpectedStartDate = request.ExpectedStartDate,
                 Status = "Assigned",
                 IsAdHoc = true,
-                PrimaryEquipmentName = catalog.Equipment?.Name ?? catalog.EquipmentId,
+                PrimaryEquipmentId = loader?.Id ?? catalog.Equipment?.Id ?? catalog.EquipmentId,
+                PrimaryEquipmentName = primaryName,
+                SecondaryEquipmentIds = secondaryIds,
+                SecondaryEquipmentNames = secondaryNames,
             };
             _context.DeviceCatalog.UpsertLocalTask(card);
 

@@ -17,20 +17,32 @@ public static class TabletTopicCatalog
         ResolveUplinkTopic(DssMqttFilters.SubFromFilesUrlReq, deviceId),
     ];
 
-    public static IReadOnlyList<string> GetDownlinkSubscriptionFilters(string deviceId) =>
-    [
-        $"to/{deviceId}/#",
-        "config/#",
-    ];
+    public static IReadOnlyList<string> GetDownlinkSubscriptionFilters(string deviceId)
+    {
+        var filters = new List<string>();
+        foreach (var alias in GetDeviceIdAliases(deviceId))
+        {
+            filters.Add($"to/{alias}/#");
+        }
+
+        filters.Add("config/#");
+        return filters;
+    }
 
     /// <summary>
     /// Uplink filters so the simulator can observe device→service traffic
     /// (including TaskCreated published by a real device or another client).
     /// </summary>
-    public static IReadOnlyList<string> GetUplinkSubscriptionFilters(string deviceId) =>
-    [
-        $"from/{deviceId}/#",
-    ];
+    public static IReadOnlyList<string> GetUplinkSubscriptionFilters(string deviceId)
+    {
+        var filters = new List<string>();
+        foreach (var alias in GetDeviceIdAliases(deviceId))
+        {
+            filters.Add($"from/{alias}/#");
+        }
+
+        return filters;
+    }
 
     public static IReadOnlyList<string> GetAllSubscriptionFilters(string deviceId)
     {
@@ -62,5 +74,30 @@ public static class TabletTopicCatalog
             "FILES" or "FILESURL" => ResolveUplinkTopic(DssMqttFilters.SubFromFilesUrlReq, deviceId),
             _ => keyOrTopic,
         };
+    }
+
+    private static IReadOnlyList<string> GetDeviceIdAliases(string deviceId)
+    {
+        var aliases = new List<string>();
+        var trimmed = deviceId.Trim();
+        AddAlias(aliases, trimmed);
+
+        if (Guid.TryParse(trimmed, out var guid))
+        {
+            AddAlias(aliases, guid.ToString("D"));
+            AddAlias(aliases, guid.ToString("N"));
+        }
+
+        return aliases;
+    }
+
+    private static void AddAlias(List<string> aliases, string alias)
+    {
+        if (aliases.Exists(existing => string.Equals(existing, alias, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        aliases.Add(alias);
     }
 }

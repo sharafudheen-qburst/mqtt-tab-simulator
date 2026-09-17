@@ -11,20 +11,24 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
-        var store = new SimulatorConfigStore();
+        var configPath = TryGetArgValue(args, "--config-path");
+        var databasePath = TryGetArgValue(args, "--db-path");
+
+        var store = new SimulatorConfigStore(configPath);
         var config = SimulatorConfigStore.LoadFromArgs(args, store);
         config.EnsureDevicesMigrated();
 
         await TrySyncLibsOnStartupAsync(config, args).ConfigureAwait(false);
 
-        await using var context = TabletSimulatorDependencyInjection.Create(config, store);
+        await using var context = TabletSimulatorDependencyInjection.Create(config, store, databasePath);
         // Keep JSON mirrored after SQLite device sync (names / migrated list).
         store.Save(config);
 
         Console.WriteLine("Tablet Simulator");
         Console.WriteLine($"DeviceId: {config.Device.DeviceId}");
         Console.WriteLine($"Environment: {config.ActiveEnvironment}");
-        Console.WriteLine($"Database: {Path.Combine(AppContext.BaseDirectory, "simulator.db")}");
+        Console.WriteLine($"Config: {store.ConfigPath}");
+        Console.WriteLine($"Database: {context.Database.DatabasePath}");
         Console.WriteLine();
 
         try
@@ -61,6 +65,25 @@ public static class Program
 
         await context.MqttClient.DisconnectAsync().ConfigureAwait(false);
         return 0;
+    }
+
+    private static string? TryGetArgValue(string[] args, string name)
+    {
+        for (var i = 0; i < args.Length - 1; i++)
+        {
+            if (string.Equals(args[i], name, StringComparison.OrdinalIgnoreCase))
+            {
+                var value = args[i + 1]?.Trim();
+                if (string.IsNullOrWhiteSpace(value) || value.StartsWith("--", StringComparison.Ordinal))
+                {
+                    return null;
+                }
+
+                return string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        return null;
     }
 
     private static async Task TrySyncLibsOnStartupAsync(SimulatorConfig config, string[] args)

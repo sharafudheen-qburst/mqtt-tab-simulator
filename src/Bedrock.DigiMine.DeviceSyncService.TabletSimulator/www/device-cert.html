@@ -24,6 +24,12 @@
   </div>
 
   <div class="form-group">
+    <label for="equipmentId">Equipment ID</label>
+    <input type="text" id="equipmentId" placeholder="f13f3437-3fd1-40c6-ac54-5b2119d16d66" spellcheck="false">
+    <p class="muted">Used to build the registration request that binds equipment to this device.</p>
+  </div>
+
+  <div class="form-group">
     <label>Key algorithm</label>
     <div class="row cert-key-options">
       <label><input type="radio" name="algorithm" value="rsa" checked> RSA (2048)</label>
@@ -87,9 +93,9 @@
   <p id="saveWarnings" class="muted" style="display:none;"></p>
 </div>
 
-<div id="registrationPanel" class="card" style="display:none;">
-  <p class="badge badge-ok">Next: register equipment with this device in Postman</p>
-  <p class="muted">POST the body below to bind equipment to the device after cert enrollment.</p>
+<div id="registrationPanel" class="card">
+  <p class="badge badge-ok">Register equipment with this device in Postman</p>
+  <p class="muted">POST the body below to bind equipment to the device. This can be done before or after cert enrollment.</p>
 
   <div class="cert-block-header">
     <h2>Registration URL</h2>
@@ -107,7 +113,6 @@
 
 <script>
 let generateResult = null;
-let registrationResult = null;
 
 function selectedAlgorithm() {
   const checked = document.querySelector('input[name="algorithm"]:checked');
@@ -130,12 +135,34 @@ async function loadConfig() {
     fetch('/api/device-cert/config').then(r => r.json()),
   ]);
   document.getElementById('deviceId').value = certConfig.deviceId || config.device?.deviceId || '';
+  document.getElementById('equipmentId').value = config.device?.equipmentId || '';
   document.getElementById('dssEnrollBaseUrl').value =
     certConfig.dssEnrollBaseUrl || config.deviceCert?.dssEnrollBaseUrl || 'https://localhost:5004/api/v1';
   document.getElementById('deviceCertOutputFolder').value =
     config.deviceCert?.outputFolder || certConfig.outputFolder || '';
   document.getElementById('certSavePathLabel').textContent =
     certConfig.savePathPreview || certConfig.outputFolder || '(default device-certs folder)';
+  updateRegistrationPreview();
+}
+
+function buildRegistrationUrl(baseUrl, deviceId) {
+  let trimmed = (baseUrl || '').trim().replace(/\/+$/, '');
+  if (/\/api\/v1$/i.test(trimmed)) {
+    trimmed = trimmed.slice(0, -'/api/v1'.length) + '/api/v1.0';
+  } else if (!/\/api\/v1\.0/i.test(trimmed)) {
+    trimmed = `${trimmed}/api/v1.0`;
+  }
+  return `${trimmed}/devices/${(deviceId || '').trim()}/registration`;
+}
+
+function updateRegistrationPreview() {
+  const deviceId = document.getElementById('deviceId').value.trim();
+  const equipmentId = document.getElementById('equipmentId').value.trim();
+  const baseUrl = document.getElementById('dssEnrollBaseUrl').value.trim();
+  document.getElementById('registrationUrl').textContent =
+    deviceId && baseUrl ? buildRegistrationUrl(baseUrl, deviceId) : '—';
+  document.getElementById('registrationBody').textContent =
+    equipmentId ? JSON.stringify({ equipmentId }) : '—';
 }
 
 async function persistDeviceCertSettings() {
@@ -143,6 +170,8 @@ async function persistDeviceCertSettings() {
   config.deviceCert = config.deviceCert || {};
   config.deviceCert.dssEnrollBaseUrl = document.getElementById('dssEnrollBaseUrl').value.trim();
   config.deviceCert.outputFolder = document.getElementById('deviceCertOutputFolder').value.trim();
+  config.device = config.device || {};
+  config.device.equipmentId = document.getElementById('equipmentId').value.trim();
   await fetch('/api/config', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -170,9 +199,7 @@ document.getElementById('generate').onclick = async () => {
 
   status.textContent = 'Generating...';
   document.getElementById('resultPanel').style.display = 'none';
-  document.getElementById('registrationPanel').style.display = 'none';
   generateResult = null;
-  registrationResult = null;
 
   try {
     await persistDeviceCertSettings();
@@ -199,8 +226,6 @@ document.getElementById('generate').onclick = async () => {
     document.getElementById('privateKeyPem').textContent = j.privateKeyPem || '';
     document.getElementById('saveStatus').textContent = '';
     document.getElementById('saveWarnings').style.display = 'none';
-    document.getElementById('registrationPanel').style.display = 'none';
-    registrationResult = null;
   } catch (e) {
     status.textContent = 'Generate failed: ' + e.message;
   }
@@ -232,13 +257,13 @@ document.getElementById('copyKey').onclick = async () => {
 
 document.getElementById('copyRegistrationUrl').onclick = async () => {
   const el = document.getElementById('copyRegistrationUrl');
-  await copyText(registrationResult?.registrationUrl || '', el, 'Copied');
+  await copyText(document.getElementById('registrationUrl').textContent || '', el, 'Copied');
   setTimeout(() => { el.textContent = 'Copy'; }, 1500);
 };
 
 document.getElementById('copyRegistrationBody').onclick = async () => {
   const el = document.getElementById('copyRegistrationBody');
-  await copyText(registrationResult?.registrationPayloadJson || '', el, 'Copied');
+  await copyText(document.getElementById('registrationBody').textContent || '', el, 'Copied');
   setTimeout(() => { el.textContent = 'Copy'; }, 1500);
 };
 
@@ -298,16 +323,7 @@ document.getElementById('saveBundle').onclick = async () => {
       saveWarnings.style.display = 'block';
     }
 
-    registrationResult = j;
-    const regPanel = document.getElementById('registrationPanel');
-    if (j.registrationUrl) {
-      document.getElementById('registrationUrl').textContent = j.registrationUrl;
-      document.getElementById('registrationBody').textContent = j.registrationPayloadJson || '';
-      regPanel.style.display = 'block';
-      regPanel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    } else {
-      regPanel.style.display = 'none';
-    }
+    updateRegistrationPreview();
     await loadConfig();
   } catch (e) {
     clearTimeout(timeoutId);
@@ -334,6 +350,10 @@ loadConfig().catch(e => {
       ? `${base}\\${deviceId} (or ${deviceId}-1, ${deviceId}-2, … if folder exists)`
       : `${base}\\{deviceId}`;
   });
+});
+
+['deviceId', 'equipmentId', 'dssEnrollBaseUrl'].forEach(id => {
+  document.getElementById(id).addEventListener('input', updateRegistrationPreview);
 });
 </script>
 </body>

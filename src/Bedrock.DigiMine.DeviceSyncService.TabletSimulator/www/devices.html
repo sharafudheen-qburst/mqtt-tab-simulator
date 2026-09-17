@@ -57,7 +57,7 @@
 <div class="table-scroll">
   <table>
     <thead>
-      <tr><th>Name / details</th><th>Device ID</th><th>Status</th><th>Actions</th></tr>
+      <tr><th>Name / details</th><th>Device / Equipment ID</th><th>Status</th><th>Actions</th></tr>
     </thead>
     <tbody id="deviceBody"></tbody>
   </table>
@@ -194,7 +194,10 @@ function renderDevices(devices, activeDeviceId) {
     tr.appendChild(tdName);
 
     const tdId = document.createElement('td');
-    tdId.innerHTML = `<code>${escapeHtml(device.deviceId)}</code>`;
+    const equipmentId = (device.equipmentId || '').trim();
+    tdId.innerHTML = equipmentId
+      ? `<code>${escapeHtml(device.deviceId)}</code><div class="muted"><code>${escapeHtml(equipmentId)}</code></div>`
+      : `<code>${escapeHtml(device.deviceId)}</code>`;
     tr.appendChild(tdId);
 
     const tdStatus = document.createElement('td');

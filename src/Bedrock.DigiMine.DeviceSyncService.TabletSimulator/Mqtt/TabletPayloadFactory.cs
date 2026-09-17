@@ -1,5 +1,6 @@
 using Bedrock.DigiMine.DeviceSyncService.ProtoDecoder;
 using Bedrock.DigiMine.DeviceSyncService.TabletSimulator.Configuration;
+using Bedrock.DigiMine.DeviceSyncService.TabletSimulator.Persistence;
 using Bedrock.DigiMine.Protos.OT;
 using Google.Protobuf;
 using DssMqttFilters = Bedrock.DigiMine.DeviceSyncService.Domain.Constants.MqttSubscriptionFilters;
@@ -110,35 +111,69 @@ public static class TabletPayloadFactory
         var taskType = catalog.TaskTypes.FirstOrDefault(t =>
             string.Equals(t.Id, request.TaskTypeId, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException("Selected task type was not found in the synced catalog.");
-        var workplace = catalog.Workplaces.FirstOrDefault(w =>
-            string.Equals(w.Id, request.WorkplaceId, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException("Selected workplace was not found in the synced catalog.");
-        var material = catalog.Materials.FirstOrDefault(m =>
-            string.Equals(m.Id, request.MaterialId, StringComparison.OrdinalIgnoreCase))
-            ?? throw new InvalidOperationException("Selected material was not found in the synced catalog.");
 
-        var destinationRequired = IsDestinationAllowed(taskType.DestinationAllowed);
-        if (destinationRequired)
+        var isHaulingSecondary = !string.IsNullOrWhiteSpace(request.LoaderEquipmentId);
+        CatalogWorkplace? workplace = null;
+        CatalogMaterial? material = null;
+        double quantity = 0;
+
+        if (isHaulingSecondary)
         {
-            if (string.IsNullOrWhiteSpace(request.AllowedDestinationId))
+            var loader = catalog.EquipmentList.FirstOrDefault(e =>
+                string.Equals(e.Id, request.LoaderEquipmentId, StringComparison.OrdinalIgnoreCase));
+            if (loader is null)
             {
-                throw new InvalidOperationException("Allowed Destination is required for this task type.");
+                throw new InvalidOperationException("Selected Loader was not found in the OU equipment list.");
             }
 
-            var destination = catalog.Workplaces.FirstOrDefault(w =>
-                string.Equals(w.Id, request.AllowedDestinationId, StringComparison.OrdinalIgnoreCase)
-                && Persistence.DeviceCatalogStore.IsDestinationWorkplace(w));
-            if (destination is null)
+            // Secondary hauling Ad-Hoc parks on DSS; workplace/material/quantity are optional placeholders.
+            if (!string.IsNullOrWhiteSpace(request.WorkplaceId))
             {
-                throw new InvalidOperationException("Selected Allowed Destination was not found in the synced catalog.");
+                workplace = catalog.Workplaces.FirstOrDefault(w =>
+                    string.Equals(w.Id, request.WorkplaceId, StringComparison.OrdinalIgnoreCase));
             }
+
+            if (!string.IsNullOrWhiteSpace(request.MaterialId))
+            {
+                material = catalog.Materials.FirstOrDefault(m =>
+                    string.Equals(m.Id, request.MaterialId, StringComparison.OrdinalIgnoreCase));
+            }
+
+            _ = double.TryParse(request.Quantity, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out quantity);
         }
-
-        if (!double.TryParse(request.Quantity, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var quantity)
-            || quantity <= 0)
+        else
         {
-            throw new InvalidOperationException("Quantity must be a positive number.");
+            workplace = catalog.Workplaces.FirstOrDefault(w =>
+                string.Equals(w.Id, request.WorkplaceId, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException("Selected workplace was not found in the synced catalog.");
+            material = catalog.Materials.FirstOrDefault(m =>
+                string.Equals(m.Id, request.MaterialId, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException("Selected material was not found in the synced catalog.");
+
+            var destinationRequired = IsDestinationAllowed(taskType.DestinationAllowed);
+            if (destinationRequired)
+            {
+                if (string.IsNullOrWhiteSpace(request.AllowedDestinationId))
+                {
+                    throw new InvalidOperationException("Allowed Destination is required for this task type.");
+                }
+
+                var destination = catalog.Workplaces.FirstOrDefault(w =>
+                    string.Equals(w.Id, request.AllowedDestinationId, StringComparison.OrdinalIgnoreCase)
+                    && Persistence.DeviceCatalogStore.IsDestinationWorkplace(w));
+                if (destination is null)
+                {
+                    throw new InvalidOperationException("Selected Allowed Destination was not found in the synced catalog.");
+                }
+            }
+
+            if (!double.TryParse(request.Quantity, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out quantity)
+                || quantity <= 0)
+            {
+                throw new InvalidOperationException("Quantity must be a positive number.");
+            }
         }
 
         double? deadlineHours = null;
@@ -155,13 +190,32 @@ public static class TabletPayloadFactory
             deadlineHours = deadline;
         }
 
-        var startTime = NormalizeTimeForWire(request.EstimatedStartTime);
-        var endTime = NormalizeTimeForWire(request.EstimatedEndTime);
+        var startTime = TryNormalizeTimeForWire(request.EstimatedStartTime);
+        var endTime = TryNormalizeTimeForWire(request.EstimatedEndTime);
         var startDate = string.IsNullOrWhiteSpace(request.ExpectedStartDate)
             ? (catalog.Shift?.MineDayDate ?? DateTimeOffset.UtcNow.ToString("yyyy-MM-dd"))
             : request.ExpectedStartDate.Trim();
 
-        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        if (string.IsNullOrWhiteSpace(startTime))
+        {
+            if (isHaulingSecondary)
+            {
+                startTime = TryNormalizeTimeForWire(catalog.Shift?.StartTime) ?? "00:00";
+            }
+            else
+            {
+                throw new InvalidOperationException("Estimated start time is required.");
+            }
+        }
+
+        if (!isHaulingSecondary && string.IsNullOrWhiteSpace(endTime))
+        {
+            throw new InvalidOperationException("Estimated end time is required.");
+        }
+
+        var eventTimeMs = request.EventTimeMs is > 0
+            ? request.EventTimeMs.Value
+            : DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         var taskId = Guid.NewGuid().ToString();
         var shiftId = catalog.Shift?.ShiftId;
         if (string.IsNullOrWhiteSpace(shiftId))
@@ -169,22 +223,32 @@ public static class TabletPayloadFactory
             shiftId = Guid.NewGuid().ToString();
         }
 
-        var equipmentId = catalog.Equipment?.Id ?? device.EquipmentId;
-        var isHauling = taskType.Name.Contains("haul", StringComparison.OrdinalIgnoreCase);
+        var currentEquipmentId = catalog.Equipment?.Id ?? device.EquipmentId;
+        var plannedEquipmentId = isHaulingSecondary
+            ? request.LoaderEquipmentId!.Trim()
+            : currentEquipmentId;
+        // Secondary Ad-Hoc always hauling; Primary uses equipment assignedOperations (e.g. ["Hauling"]).
+        var isHauling = isHaulingSecondary
+            || DeviceCatalogStore.HasHaulingAssignedOperation(catalog.Equipment)
+            || string.Equals(taskType.Operation, "hauling", StringComparison.OrdinalIgnoreCase);
 
         var inner = new TaskCreatedPayload
         {
             TaskType = taskType.Name,
             TaskTypeId = taskType.Id,
-            MaterialId = material.Id,
+            MaterialId = material?.Id ?? string.Empty,
             Quantity = quantity,
-            PlannedEquipmentId = equipmentId,
+            PlannedEquipmentId = plannedEquipmentId,
             ExpectedStartDate = startDate,
             EstimatedStartTime = startTime,
-            EstimatedEndTime = endTime,
             AdHoc = true,
             IsHaulingTask = isHauling,
         };
+        // Secondary Ad-Hoc: start time only (matches eventTime); primary still sends end.
+        if (!isHaulingSecondary && !string.IsNullOrWhiteSpace(endTime))
+        {
+            inner.EstimatedEndTime = endTime;
+        }
         if (deadlineHours is not null)
         {
             inner.DeadlineHours = deadlineHours.Value;
@@ -195,19 +259,25 @@ public static class TabletPayloadFactory
             inner.AllowedDestinationId = request.AllowedDestinationId.Trim();
         }
 
+        if (isHaulingSecondary && !string.IsNullOrWhiteSpace(currentEquipmentId))
+        {
+            // Current tablet is the secondary (truck); loader is planned/primary.
+            inner.SecondaryEquipmentIds.Add(currentEquipmentId);
+        }
+
         var envelope = new EventEnvelope
         {
             MessageId = Guid.NewGuid().ToString(),
             DeviceId = device.DeviceId,
-            EquipmentId = equipmentId,
+            EquipmentId = currentEquipmentId,
             EventType = EventType.TaskCreated,
-            Timestamp = now,
-            EventTime = now,
+            Timestamp = eventTimeMs,
+            EventTime = eventTimeMs,
             Version = "1",
             Priority = 1,
             TaskId = taskId,
             ShiftId = shiftId,
-            WorkplaceId = workplace.Id,
+            WorkplaceId = workplace?.Id ?? string.Empty,
             Payload = inner.ToByteString(),
         };
 
@@ -218,11 +288,11 @@ public static class TabletPayloadFactory
         return (topic, bytes, taskId, json);
     }
 
-    private static string NormalizeTimeForWire(string? raw)
+    private static string? TryNormalizeTimeForWire(string? raw)
     {
         if (string.IsNullOrWhiteSpace(raw))
         {
-            throw new InvalidOperationException("Estimated start and end times are required.");
+            return null;
         }
 
         if (DateTime.TryParse(raw, System.Globalization.CultureInfo.InvariantCulture,
@@ -233,6 +303,10 @@ public static class TabletPayloadFactory
 
         return raw.Trim();
     }
+
+    private static string NormalizeTimeForWire(string? raw) =>
+        TryNormalizeTimeForWire(raw)
+        ?? throw new InvalidOperationException("Estimated start and end times are required.");
 
     private static bool IsDestinationAllowed(string? destinationAllowed)
     {

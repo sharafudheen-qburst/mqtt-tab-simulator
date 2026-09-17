@@ -52,12 +52,15 @@ public sealed class TabletSimulatorContext : IAsyncDisposable
 public static class TabletSimulatorDependencyInjection
 {
     [SuppressMessage("Reliability", "CA2000:Dispose objects before losing scope", Justification = "Ownership transferred to TabletSimulatorContext.")]
-    public static TabletSimulatorContext Create(SimulatorConfig config, SimulatorConfigStore configStore)
+    public static TabletSimulatorContext Create(
+        SimulatorConfig config,
+        SimulatorConfigStore configStore,
+        string? databasePath = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(configStore);
 
-        var database = new SimulatorDatabase();
+        var database = new SimulatorDatabase(databasePath);
         var inboundMessages = new InboundMessageStore(database);
         var outboundMessages = new OutboundMessageStore(database);
         var appStorage = new AppStorageStore(database);

@@ -17,12 +17,19 @@ cd bedrock.digimine.tablet-simulator
 # Copy Domain + ProtoDecoder DLLs from DeviceSyncService repo
 powershell -File scripts/sync-libs.ps1
 
-# Node MQTT bridge
+# Node MQTT bridge (required for mqtts:// on Windows)
 cd src/Bedrock.DigiMine.DeviceSyncService.TabletSimulator/NodeBridge
 npm install
 cd ../../../..
 
 dotnet build
+```
+
+If you `dotnet publish` to a separate folder (e.g. for multiple simulator instances), `node_modules` is copied automatically when it exists in the source `NodeBridge` folder. For an already-published folder that is missing deps, run:
+
+```powershell
+cd path\to\your\instance\NodeBridge
+npm install
 ```
 
 ## Run

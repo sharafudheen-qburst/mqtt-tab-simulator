@@ -120,7 +120,13 @@
 
 
 
-  <Target Name="CopyNodeBridgeModules" AfterTargets="Build" Condition="Exists('NodeBridge\node_modules')">
+  <Target Name="CopyNodeBridgeModules" AfterTargets="Build;Publish" Condition="Exists('NodeBridge\node_modules')">
+
+    <PropertyGroup>
+
+      <_NodeBridgeDestination>$([MSBuild]::EnsureTrailingSlash('$(OutputPath)'))NodeBridge\node_modules\</_NodeBridgeDestination>
+
+    </PropertyGroup>
 
     <ItemGroup>
 
@@ -130,7 +136,27 @@
 
     <Copy SourceFiles="@(_NodeBridgeModules)"
 
-          DestinationFiles="@(_NodeBridgeModules->'$(OutputPath)NodeBridge\node_modules\%(RecursiveDir)%(Filename)%(Extension)')"
+          DestinationFiles="@(_NodeBridgeModules->'$(_NodeBridgeDestination)%(RecursiveDir)%(Filename)%(Extension)')"
+
+          SkipUnchangedFiles="true" />
+
+  </Target>
+
+  <Target Name="CopyNodeBridgeModulesToPublishDir"
+
+          AfterTargets="Publish"
+
+          Condition="'$(PublishDir)' != '' and Exists('NodeBridge\node_modules') and !Exists('$(PublishDir)NodeBridge\node_modules\mqtt')">
+
+    <ItemGroup>
+
+      <_NodeBridgePublishModules Include="NodeBridge\node_modules\**\*" />
+
+    </ItemGroup>
+
+    <Copy SourceFiles="@(_NodeBridgePublishModules)"
+
+          DestinationFiles="@(_NodeBridgePublishModules->'$(PublishDir)NodeBridge\node_modules\%(RecursiveDir)%(Filename)%(Extension)')"
 
           SkipUnchangedFiles="true" />
 

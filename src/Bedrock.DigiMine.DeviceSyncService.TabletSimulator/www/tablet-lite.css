@@ -154,6 +154,39 @@ body.tl-page .tl-shell-page {
   text-overflow: ellipsis;
 }
 
+.tl-tz {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.tl-tz-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: #8b919a;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.tl-tz select {
+  background: #2a2f3a;
+  border: 1px solid #3a4150;
+  color: #e8eaed;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  min-width: 118px;
+  cursor: pointer;
+}
+
+.tl-tz select:focus {
+  outline: 1px solid #5b8def;
+  outline-offset: 1px;
+}
+
 .tl-badge-ready {
   background: #1f6b5a;
   color: #b6f3e0;

@@ -90,7 +90,8 @@ public sealed class DeviceCatalogStore
         _snapshot.Materials = [];
         _snapshot.MaterialLinks = [];
         _snapshot.Shift = null;
-        // Keep task types / mine / equipment / tasks — only OU-topic data is wiped.
+        _snapshot.EquipmentList = [];
+        // Keep task types / mine / current equipment / tasks — only OU-topic data is wiped.
     }
 
     public void EnsureDevice(string deviceId, string equipmentId)
@@ -239,7 +240,7 @@ public sealed class DeviceCatalogStore
 
         if (!string.IsNullOrWhiteSpace(tz))
         {
-            _snapshot.TimeZone = tz;
+            _snapshot.TimeZone = NormalizeTimeZoneId(tz);
         }
 
         // Refresh mine-day label if we already have shift rules.
@@ -272,8 +273,10 @@ public sealed class DeviceCatalogStore
             {
                 Id = id,
                 Name = name,
+                Operation = ReadString(item, "operation") ?? string.Empty,
                 WorkplaceTypes = ReadStringArray(item, "workplaceTypes"),
                 PrimaryEquipmentTypes = ReadStringArray(item, "primaryEquipmentTypes"),
+                SecondaryEquipmentTypes = ReadStringArray(item, "secondaryEquipmentTypes"),
                 DestinationAllowed = ReadString(item, "destinationAllowed") ?? string.Empty,
                 MeasurementUnits = ReadString(item, "measurementUnits") ?? string.Empty,
                 MultiplierUnit = ReadString(item, "multiplierUnit") ?? string.Empty,
@@ -448,11 +451,12 @@ public sealed class DeviceCatalogStore
 
     private DateTime GetMineLocalNow()
     {
+        var normalizedTimeZone = NormalizeTimeZoneId(_snapshot.TimeZone);
         try
         {
-            if (!string.IsNullOrWhiteSpace(_snapshot.TimeZone))
+            if (!string.IsNullOrWhiteSpace(normalizedTimeZone))
             {
-                var tz = TimeZoneInfo.FindSystemTimeZoneById(_snapshot.TimeZone);
+                var tz = TimeZoneInfo.FindSystemTimeZoneById(normalizedTimeZone);
                 return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
             }
         }
@@ -467,17 +471,22 @@ public sealed class DeviceCatalogStore
         // Try common IANA → Windows mapping for DigiMine defaults.
         try
         {
-            if (string.Equals(_snapshot.TimeZone, "Asia/Dubai", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(normalizedTimeZone, "Asia/Dubai", StringComparison.OrdinalIgnoreCase))
             {
                 var tz = TimeZoneInfo.FindSystemTimeZoneById("Arabian Standard Time");
                 return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
             }
 
-            if (string.Equals(_snapshot.TimeZone, "Asia/Kolkata", StringComparison.OrdinalIgnoreCase)
-                || string.Equals(_snapshot.TimeZone, "Asia/Calcutta", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(normalizedTimeZone, "Asia/Kolkata", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(normalizedTimeZone, "Asia/Calcutta", StringComparison.OrdinalIgnoreCase))
             {
                 var tz = TimeZoneInfo.FindSystemTimeZoneById("India Standard Time");
                 return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, tz);
+            }
+
+            if (string.Equals(normalizedTimeZone, "UTC", StringComparison.OrdinalIgnoreCase))
+            {
+                return DateTime.UtcNow;
             }
         }
         catch (TimeZoneNotFoundException)
@@ -485,6 +494,33 @@ public sealed class DeviceCatalogStore
         }
 
         return DateTime.Now;
+    }
+
+    private static string NormalizeTimeZoneId(string? raw)
+    {
+        var tz = (raw ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(tz))
+        {
+            return string.Empty;
+        }
+
+        if (tz.Contains("Asia/Dubai", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Asia/Dubai";
+        }
+
+        if (tz.Contains("Asia/Kolkata", StringComparison.OrdinalIgnoreCase)
+            || tz.Contains("Asia/Calcutta", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Asia/Kolkata";
+        }
+
+        if (tz.Contains("UTC", StringComparison.OrdinalIgnoreCase))
+        {
+            return "UTC";
+        }
+
+        return tz;
     }
 
     private string ResolveMineDayDate(string? anchorTime, string? operationalDay)
@@ -532,7 +568,8 @@ public sealed class DeviceCatalogStore
             }
         }
 
-        var equipmentId = _snapshot.EquipmentId;
+        var list = new List<CatalogEquipment>();
+        var currentId = _snapshot.EquipmentId;
         foreach (var item in array.EnumerateArray())
         {
             var id = ReadString(item, "equipmentId") ?? ReadString(item, "id");
@@ -541,18 +578,72 @@ public sealed class DeviceCatalogStore
                 continue;
             }
 
-            if (!string.IsNullOrWhiteSpace(equipmentId)
-                && !string.Equals(id, equipmentId, StringComparison.OrdinalIgnoreCase))
+            var entry = ParseEquipmentItem(item, id);
+            var isAssigned = !string.IsNullOrWhiteSpace(currentId)
+                && string.Equals(id, currentId, StringComparison.OrdinalIgnoreCase);
+
+            // Match OT: never overwrite assigned device equipment from the bulk list
+            // (list items lack assignedOperations and would wipe Hauling ops).
+            if (isAssigned && _snapshot.Equipment is not null)
             {
+                entry = MergeListItemOntoAssigned(_snapshot.Equipment, entry);
+                list.Add(entry);
+                _snapshot.Equipment.Name = entry.Name;
+                _snapshot.Equipment.TypeId = entry.TypeId;
+                _snapshot.Equipment.TypeName = entry.TypeName;
+                if (!string.IsNullOrWhiteSpace(entry.OperationRole))
+                {
+                    _snapshot.Equipment.OperationRole = entry.OperationRole;
+                }
+
                 continue;
             }
 
-            ApplyEquipmentFromItem(item, id);
-            if (!string.IsNullOrWhiteSpace(equipmentId))
+            list.Add(entry);
+
+            // Bootstrap current equipment from list only when config/equipment has not arrived yet.
+            if (isAssigned && _snapshot.Equipment is null)
             {
-                break;
+                _snapshot.Equipment = CloneEquipment(entry);
+                _snapshot.EquipmentId = id;
             }
         }
+
+        _snapshot.EquipmentList = list;
+    }
+
+    /// <summary>
+    /// Prefer assigned-equipment ops; fill name/type/role from list when present.
+    /// </summary>
+    private static CatalogEquipment MergeListItemOntoAssigned(CatalogEquipment assigned, CatalogEquipment listItem)
+    {
+        var merged = CloneEquipment(assigned);
+        if (!string.IsNullOrWhiteSpace(listItem.Name))
+        {
+            merged.Name = listItem.Name;
+        }
+
+        if (!string.IsNullOrWhiteSpace(listItem.TypeId))
+        {
+            merged.TypeId = listItem.TypeId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(listItem.TypeName))
+        {
+            merged.TypeName = listItem.TypeName;
+        }
+
+        if (!string.IsNullOrWhiteSpace(listItem.OperationRole))
+        {
+            merged.OperationRole = listItem.OperationRole;
+        }
+
+        if (merged.AssignedOperations.Count == 0 && listItem.AssignedOperations.Count > 0)
+        {
+            merged.AssignedOperations = [.. listItem.AssignedOperations];
+        }
+
+        return merged;
     }
 
     private void ApplyDeviceEquipment(JsonElement payload)
@@ -565,10 +656,23 @@ public sealed class DeviceCatalogStore
             return;
         }
 
-        ApplyEquipmentFromItem(payload, id);
+        var entry = ParseEquipmentItem(payload, id);
+        _snapshot.Equipment = entry;
+        _snapshot.EquipmentId = id;
+
+        var idx = _snapshot.EquipmentList.FindIndex(e =>
+            string.Equals(e.Id, id, StringComparison.OrdinalIgnoreCase));
+        if (idx >= 0)
+        {
+            _snapshot.EquipmentList[idx] = CloneEquipment(entry);
+        }
+        else
+        {
+            _snapshot.EquipmentList.Add(CloneEquipment(entry));
+        }
     }
 
-    private void ApplyEquipmentFromItem(JsonElement item, string id)
+    private static CatalogEquipment ParseEquipmentItem(JsonElement item, string id)
     {
         var name = ReadString(item, "name") ?? id;
         var typeId = string.Empty;
@@ -584,15 +688,102 @@ public sealed class DeviceCatalogStore
             typeName = ReadString(item, "equipmentTypeName") ?? ReadString(item, "typeName") ?? string.Empty;
         }
 
-        _snapshot.Equipment = new CatalogEquipment
+        return new CatalogEquipment
         {
             Id = id,
             Name = name,
             TypeId = typeId,
             TypeName = typeName,
+            OperationRole = NormalizeOperationRole(ReadString(item, "operationRole")),
+            AssignedOperations = ReadStringArray(item, "assignedOperations"),
         };
-        _snapshot.EquipmentId = id;
     }
+
+    private static string NormalizeOperationRole(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return string.Empty;
+        }
+
+        var v = raw.Trim();
+        if (string.Equals(v, "1", StringComparison.Ordinal)
+            || string.Equals(v, "PRIMARY", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v, "Primary", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Primary";
+        }
+
+        if (string.Equals(v, "2", StringComparison.Ordinal)
+            || string.Equals(v, "SECONDARY", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(v, "Secondary", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Secondary";
+        }
+
+        return v;
+    }
+
+    private static CatalogEquipment CloneEquipment(CatalogEquipment source) =>
+        new()
+        {
+            Id = source.Id,
+            Name = source.Name,
+            TypeId = source.TypeId,
+            TypeName = source.TypeName,
+            OperationRole = source.OperationRole,
+            AssignedOperations = [.. source.AssignedOperations],
+        };
+
+    /// <summary>
+    /// Current tablet equipment is Secondary (+ Hauling when ops known) — opens Loader Ad-Hoc dialog.
+    /// EquipmentListItem has no assignedOperations; empty ops after list merge still counts as secondary.
+    /// </summary>
+    public static bool IsHaulingSecondaryEquipment(CatalogEquipment? equipment)
+    {
+        if (equipment is null)
+        {
+            return false;
+        }
+
+        if (!string.Equals(equipment.OperationRole, "Secondary", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Same empty-ops rule as Primary loaders (list items omit assignedOperations).
+        if (equipment.AssignedOperations.Count == 0)
+        {
+            return true;
+        }
+
+        return equipment.AssignedOperations.Any(HasHaulingOperation);
+    }
+
+    public static bool IsHaulingPrimaryEquipment(CatalogEquipment equipment)
+    {
+        if (!string.Equals(equipment.OperationRole, "Primary", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // EquipmentListItem carries operationRole but not assignedOperations — treat Primary as loader.
+        if (equipment.AssignedOperations.Count == 0)
+        {
+            return true;
+        }
+
+        return equipment.AssignedOperations.Any(HasHaulingOperation);
+    }
+
+    private static bool HasHaulingOperation(string op) =>
+        string.Equals(op, "Hauling", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(op, "HAULING", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(op, "1", StringComparison.Ordinal); // MiningOperation.Hauling enum ordinal
+
+    /// <summary>True when config/equipment assignedOperations includes Hauling (any role).</summary>
+    public static bool HasHaulingAssignedOperation(CatalogEquipment? equipment) =>
+        equipment?.AssignedOperations.Any(HasHaulingOperation) == true;
 
     private void ApplyTaskEvent(JsonElement root, string? eventType)
     {
@@ -671,7 +862,34 @@ public sealed class DeviceCatalogStore
             ?? _snapshot.TaskTypes.FirstOrDefault(t => t.Id == taskTypeId)?.MeasurementUnits
             ?? existing.UnitOfMeasure;
 
-        var equipmentName = _snapshot.Equipment?.Name ?? existing.PrimaryEquipmentName;
+        var plannedEquipmentId = ReadString(payload, "plannedEquipmentId")
+            ?? ReadString(payload, "primaryEquipmentId")
+            ?? existing.PrimaryEquipmentId;
+        var primaryName = existing.PrimaryEquipmentName;
+        if (!string.IsNullOrWhiteSpace(plannedEquipmentId))
+        {
+            primaryName = ResolveEquipmentName(plannedEquipmentId) ?? primaryName;
+        }
+
+        if (string.IsNullOrWhiteSpace(primaryName))
+        {
+            primaryName = _snapshot.Equipment?.Name ?? string.Empty;
+        }
+
+        var secondaryIds = ReadStringArray(payload, "secondaryEquipmentIds");
+        if (secondaryIds.Count == 0)
+        {
+            secondaryIds = [.. existing.SecondaryEquipmentIds];
+        }
+
+        var secondaryNames = string.Join(", ", secondaryIds
+            .Select(ResolveEquipmentName)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Cast<string>());
+        if (string.IsNullOrWhiteSpace(secondaryNames))
+        {
+            secondaryNames = existing.SecondaryEquipmentNames;
+        }
 
         _tasks[taskId] = new CatalogTaskCard
         {
@@ -693,8 +911,29 @@ public sealed class DeviceCatalogStore
             ExpectedStartDate = startDate,
             Status = string.IsNullOrWhiteSpace(status) ? "Assigned" : status,
             IsAdHoc = isAdHoc,
-            PrimaryEquipmentName = equipmentName,
+            PrimaryEquipmentId = plannedEquipmentId ?? string.Empty,
+            PrimaryEquipmentName = primaryName,
+            SecondaryEquipmentIds = secondaryIds,
+            SecondaryEquipmentNames = secondaryNames,
         };
+    }
+
+    private string? ResolveEquipmentName(string equipmentId)
+    {
+        if (string.IsNullOrWhiteSpace(equipmentId))
+        {
+            return null;
+        }
+
+        if (_snapshot.Equipment is not null
+            && string.Equals(_snapshot.Equipment.Id, equipmentId, StringComparison.OrdinalIgnoreCase))
+        {
+            return _snapshot.Equipment.Name;
+        }
+
+        return _snapshot.EquipmentList
+            .FirstOrDefault(e => string.Equals(e.Id, equipmentId, StringComparison.OrdinalIgnoreCase))
+            ?.Name;
     }
 
     private static JsonElement GetInnerPayload(JsonElement root)
@@ -881,21 +1120,16 @@ public sealed class DeviceCatalogStore
             OuId = source.OuId,
             MineName = source.MineName,
             TimeZone = source.TimeZone,
-            Equipment = source.Equipment is null
-                ? null
-                : new CatalogEquipment
-                {
-                    Id = source.Equipment.Id,
-                    Name = source.Equipment.Name,
-                    TypeId = source.Equipment.TypeId,
-                    TypeName = source.Equipment.TypeName,
-                },
+            Equipment = source.Equipment is null ? null : CloneEquipment(source.Equipment),
+            EquipmentList = source.EquipmentList.Select(CloneEquipment).ToList(),
             TaskTypes = source.TaskTypes.Select(t => new CatalogTaskType
             {
                 Id = t.Id,
                 Name = t.Name,
+                Operation = t.Operation,
                 WorkplaceTypes = [.. t.WorkplaceTypes],
                 PrimaryEquipmentTypes = [.. t.PrimaryEquipmentTypes],
+                SecondaryEquipmentTypes = [.. t.SecondaryEquipmentTypes],
                 DestinationAllowed = t.DestinationAllowed,
                 MeasurementUnits = t.MeasurementUnits,
                 MultiplierUnit = t.MultiplierUnit,
@@ -951,6 +1185,9 @@ public sealed class DeviceCatalogStore
             Status = t.Status,
             IsAdHoc = t.IsAdHoc,
             PrimaryEquipmentName = t.PrimaryEquipmentName,
+            PrimaryEquipmentId = t.PrimaryEquipmentId,
+            SecondaryEquipmentNames = t.SecondaryEquipmentNames,
+            SecondaryEquipmentIds = [.. t.SecondaryEquipmentIds],
         };
 
     public static bool IsDestinationWorkplace(CatalogWorkplace workplace) =>

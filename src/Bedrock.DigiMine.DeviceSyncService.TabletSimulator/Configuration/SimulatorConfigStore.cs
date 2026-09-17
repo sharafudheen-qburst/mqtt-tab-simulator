@@ -14,16 +14,20 @@ public sealed class SimulatorConfigStore
     };
 
     private readonly string _configPath;
+    private readonly string _baseDirectory;
     private readonly object _lock = new();
 
-    public SimulatorConfigStore()
+    public SimulatorConfigStore(string? configPath = null)
     {
-        _configPath = Path.Combine(AppContext.BaseDirectory, "simulator-config.json");
+        _configPath = string.IsNullOrWhiteSpace(configPath)
+            ? Path.Combine(AppContext.BaseDirectory, "simulator-config.json")
+            : Path.GetFullPath(configPath.Trim());
+        _baseDirectory = Path.GetDirectoryName(_configPath) ?? AppContext.BaseDirectory;
     }
 
     public string ConfigPath => _configPath;
 
-    public string CertificatesRoot => Path.Combine(AppContext.BaseDirectory, "certificates");
+    public string CertificatesRoot => Path.Combine(_baseDirectory, "certificates");
 
     public SimulatorConfig Load()
     {

@@ -104,7 +104,10 @@
     <button type="button" class="btn" id="viewPrev">Previous</button>
     <button type="button" class="btn" id="viewNext">Next</button>
     <button type="button" class="btn" id="viewShowTimes" hidden aria-pressed="false">Show times</button>
+    <button type="button" class="btn btn-primary" id="viewCopy">Copy</button>
+    <button type="button" class="btn btn-primary" id="viewSave">Save</button>
     <button type="button" class="btn" id="viewClose">Close</button>
+    <span id="viewCopyStatus" class="muted"></span>
   </p>
 </dialog>
 
@@ -113,6 +116,7 @@
   <div class="publish-tabs" role="tablist">
     <button type="button" class="publish-tab active" id="tabSync" role="tab" aria-selected="true" data-publish-tab="sync">Sync</button>
     <button type="button" class="publish-tab" id="tabTask" role="tab" aria-selected="false" data-publish-tab="task">Task</button>
+    <button type="button" class="publish-tab" id="tabApi" role="tab" aria-selected="false" data-publish-tab="api">API endpoints</button>
   </div>
 
   <div id="publishPanelSync" class="publish-panel" role="tabpanel">
@@ -164,6 +168,19 @@
     <button type="button" class="btn" id="loadTaskPreset">Load preset</button>
     </p>
     <p id="taskPublishStatus" class="muted"></p>
+  </div>
+
+  <div id="publishPanelApi" class="publish-panel" role="tabpanel" hidden>
+    <p class="muted">DSS HTTP endpoints defined under <code>Bedrock.DigiMine.DeviceSyncService.Api/Endpoints</code>. Fill in the base URL and sample IDs below to generate ready-to-run curl commands.</p>
+    <p class="form-group"><label>DSS base URL (scheme + host, no path)<br>
+      <input type="text" id="apiBaseUrl" size="60" placeholder="https://localhost:5004">
+    </label></p>
+    <p class="row" style="gap:1rem;flex-wrap:wrap;">
+      <label>Sample device ID<br><input type="text" id="apiSampleDeviceId" size="40"></label>
+      <label>Sample equipment ID<br><input type="text" id="apiSampleEquipmentId" size="40"></label>
+      <label>Bearer token (optional)<br><input type="text" id="apiSampleToken" size="40" placeholder="paste access token"></label>
+    </p>
+    <div id="apiEndpointList"></div>
   </div>
 </div>
 
@@ -235,6 +252,9 @@ const viewContent = document.getElementById('viewContent');
 const viewPrev = document.getElementById('viewPrev');
 const viewNext = document.getElementById('viewNext');
 const viewShowTimesBtn = document.getElementById('viewShowTimes');
+const viewCopyBtn = document.getElementById('viewCopy');
+const viewSaveBtn = document.getElementById('viewSave');
+const viewCopyStatus = document.getElementById('viewCopyStatus');
 const mqttGlobalLog = document.getElementById('mqttGlobalLog');
 const mqttLogCount = document.getElementById('mqttLogCount');
 const autoDisposeEnabled = document.getElementById('autoDisposeEnabled');
@@ -666,6 +686,7 @@ async function renderViewDialog() {
   viewPosition.textContent = `${index + 1} of ${entries.length}`;
   viewPrev.disabled = index <= 0;
   viewNext.disabled = index >= entries.length - 1;
+  viewCopyStatus.textContent = '';
   updateShowTimesButton();
 
   if (mode !== 'log') {
@@ -758,10 +779,47 @@ viewShowTimesBtn.onclick = () => {
   }
   renderTimestampPanel(viewContent.textContent || '');
 };
+viewCopyBtn.onclick = async () => {
+  const text = viewContent.textContent || '';
+  if (!text.trim()) {
+    viewCopyStatus.textContent = 'Nothing to copy';
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    viewCopyStatus.textContent = 'Copied';
+  } catch {
+    viewCopyStatus.textContent = 'Copy failed';
+  }
+};
+viewSaveBtn.onclick = () => {
+  const text = viewContent.textContent || '';
+  if (!text.trim()) {
+    viewCopyStatus.textContent = 'Nothing to save';
+    return;
+  }
+  const entry = viewNav.entries[viewNav.index];
+  const topicPart = (entry?.msg?.topic || 'payload').replace(/[^\w.-]+/g, '_');
+  const modePart = viewNav.mode === 'log' ? 'decoded-log' : 'encoded-payload';
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${modePart}_${topicPart}_${stamp}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  viewCopyStatus.textContent = 'Saved';
+};
 document.getElementById('viewClose').onclick = () => viewDialog.close();
 viewDialog.addEventListener('keydown', e => {
   if (e.key === 'ArrowLeft') { e.preventDefault(); stepView(-1); }
   if (e.key === 'ArrowRight') { e.preventDefault(); stepView(1); }
+});
+viewDialog.addEventListener('close', () => {
+  viewCopyStatus.textContent = '';
 });
 document.getElementById('clear').onclick = async () => {
   messages.length = 0;
@@ -1240,6 +1298,12 @@ loadStatus().catch(e => status.textContent = 'status error: ' + e);
 fetch('/api/devices').then(r => r.json()).then(data => {
   if (!data.devices?.length) window.location.href = '/';
 }).catch(() => {});
+fetch('/api/config').then(r => r.json()).then(config => {
+  const enrollBase = config.deviceCert?.dssEnrollBaseUrl || '';
+  const rootUrl = enrollBase.replace(/\/api\/v1(\.0)?\/?$/i, '') || 'https://localhost:5004';
+  document.getElementById('apiBaseUrl').value = rootUrl;
+  renderApiEndpoints();
+}).catch(() => {});
 loadInboundFromStorage();
 loadInboundHistory().catch(e => status.textContent = 'inbound load error: ' + e);
 loadOutboundFromStorage();
@@ -1324,7 +1388,7 @@ document.querySelectorAll('[data-preset]').forEach(btn => {
 });
 
 function setPublishTab(tab) {
-  activePublishTab = tab === 'task' ? 'task' : 'sync';
+  activePublishTab = tab === 'task' ? 'task' : (tab === 'api' ? 'api' : 'sync');
   document.querySelectorAll('.publish-tab').forEach(btn => {
     const active = btn.dataset.publishTab === activePublishTab;
     btn.classList.toggle('active', active);
@@ -1332,10 +1396,190 @@ function setPublishTab(tab) {
   });
   document.getElementById('publishPanelSync').hidden = activePublishTab !== 'sync';
   document.getElementById('publishPanelTask').hidden = activePublishTab !== 'task';
+  document.getElementById('publishPanelApi').hidden = activePublishTab !== 'api';
+  if (activePublishTab === 'api') renderApiEndpoints();
 }
 
 document.querySelectorAll('.publish-tab').forEach(btn => {
   btn.onclick = () => setPublishTab(btn.dataset.publishTab);
+});
+
+// DSS HTTP endpoints from Bedrock.DigiMine.DeviceSyncService.Api/Endpoints, kept in sync manually.
+const API_ENDPOINTS = [
+  {
+    method: 'POST', path: '/api/v1/devices/{deviceId}/enroll', tag: 'DeviceEnrollment',
+    summary: 'Enrolls a device CSR via cert-manager and returns issued certificate material.',
+    auth: 'Anonymous',
+    body: () => ({ csrPem: '-----BEGIN CERTIFICATE REQUEST-----\n...\n-----END CERTIFICATE REQUEST-----' }),
+  },
+  {
+    method: 'POST', path: '/api/v1.0/device-mapping', tag: 'DeviceMapping',
+    summary: 'Registers a device-to-equipment mapping in Redis (temporary/dev helper).',
+    auth: 'Policy: DeviceMappingWrite',
+    body: (d, e) => ({ deviceId: d, equipmentId: e }),
+  },
+  {
+    method: 'GET', path: '/api/v1.0/devices/{deviceId}/tum-states?role=secondary', tag: 'DeviceOtConfig',
+    summary: 'Returns hauling secondary equipment TUM states for the Hauling Overview picker.',
+    auth: 'Policy: DeviceRegistrationWrite',
+  },
+  {
+    method: 'PUT', path: '/api/v1.0/devices/{deviceId}/panel-config', tag: 'DevicePanelConfig',
+    summary: 'Persists an OT admin panel configuration change via Configuration Service. Admin user ID is resolved from the bearer token.',
+    auth: 'Policy: DevicePanelConfigWrite',
+    body: () => ({ panelType: 'hauling', configuration: { /* panel-specific shape */ } }),
+  },
+  {
+    method: 'POST', path: '/api/v1.0/devices/{deviceId}/registration', tag: 'DeviceRegistration',
+    summary: 'Links a device to a physical equipment asset via Configuration Service.',
+    auth: 'Policy: DeviceRegistrationWrite',
+    body: (d, e) => ({ equipmentId: e, attachElementIfNotPresent: true }),
+  },
+  {
+    method: 'DELETE', path: '/api/v1.0/devices/{deviceId}/registration', tag: 'DeviceRegistration',
+    summary: 'Unlinks a device from its current equipment asset via Configuration Service.',
+    auth: 'Policy: DeviceRegistrationDelete',
+    body: (d, e) => ({ equipmentId: e, disableDetachedInstance: false }),
+  },
+  {
+    method: 'GET', path: '/api/v1/devices/resolve?macId={macId}', tag: 'DeviceResolve',
+    summary: 'Resolves device info by MAC address.',
+    auth: 'Anonymous',
+  },
+  {
+    method: 'PUT', path: '/api/v1/files/{storagePath}', tag: 'Files',
+    summary: 'Uploads a file (multipart/form-data) using the URL path as the SeaweedFS object key. Internal mirror at /api/v1/internal/files/{storagePath} uses mTLS + FileAuthorizationFilter instead of bearer auth.',
+    auth: 'Policy: FilesWrite (public) / FileAuthorizationFilter (internal)',
+    form: 'file=@/path/to/local/file',
+  },
+  {
+    method: 'GET', path: '/api/v1/files/{storagePath}', tag: 'Files',
+    summary: 'Downloads a file from SeaweedFS by storage path. Internal mirror at /api/v1/internal/files/{storagePath}.',
+    auth: 'Policy: FilesRead (public) / FileAuthorizationFilter (internal)',
+  },
+  {
+    method: 'GET', path: '/api/v1/files/?max=100', tag: 'Files',
+    summary: 'Lists file keys under the caller\'s prefix. Internal mirror at /api/v1/internal/files/.',
+    auth: 'Policy: FilesRead (public) / FileAuthorizationFilter (internal)',
+  },
+  {
+    method: 'GET', path: '/api/v1.0/lookup/operational-units', tag: 'Lookup',
+    summary: 'Returns the list of operational units.',
+    auth: 'Policy: LookupOperationalUnitsRead',
+  },
+  {
+    method: 'GET', path: '/api/v1.0/lookup/equipments', tag: 'Lookup',
+    summary: 'Returns unassigned equipments for the operational unit passed via header.',
+    auth: 'Policy: LookupEquipmentsRead',
+    header: (d, e) => `x-operational-unit-id: ${e}`,
+  },
+  {
+    method: 'GET', path: '/api/v1/time', tag: 'Time',
+    summary: 'Returns the current server time.',
+    auth: 'AllowAnonymous',
+  },
+];
+
+function buildApiCurl(ep, baseUrl, deviceId, equipmentId, token) {
+  const url = `${baseUrl}${ep.path}`
+    .replace('{deviceId}', deviceId || '{deviceId}')
+    .replace('{macId}', 'AA:BB:CC:DD:EE:FF')
+    .replace('{storagePath}', `${equipmentId || '{equipmentId}'}/photos/sample.jpg`);
+  const lines = [`curl -X ${ep.method} "${url}"`];
+  if (token) lines.push(`  -H "Authorization: Bearer ${token}"`);
+  if (typeof ep.header === 'function') lines.push(`  -H "${ep.header(deviceId, equipmentId)}"`);
+  if (typeof ep.body === 'function') {
+    lines.push('  -H "Content-Type: application/json"');
+    lines.push(`  -d '${JSON.stringify(ep.body(deviceId, equipmentId))}'`);
+  } else if (ep.form) {
+    lines.push('  -H "Content-Type: multipart/form-data"');
+    lines.push(`  -F "${ep.form}"`);
+  }
+  return lines.join(' \\\n');
+}
+
+async function copyApiText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    const original = btn.textContent;
+    btn.textContent = 'Copied';
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch {
+    btn.textContent = 'Copy failed';
+  }
+}
+
+function renderApiEndpoints() {
+  const baseUrl = (document.getElementById('apiBaseUrl').value || 'https://localhost:5004').trim().replace(/\/+$/, '');
+  const deviceId = (document.getElementById('apiSampleDeviceId').value || document.getElementById('deviceIdLabel').textContent || '').trim();
+  const equipmentId = (document.getElementById('apiSampleEquipmentId').value || document.getElementById('equipmentIdLabel').textContent || '').trim();
+  const token = document.getElementById('apiSampleToken').value.trim();
+  const list = document.getElementById('apiEndpointList');
+  list.innerHTML = '';
+
+  API_ENDPOINTS.forEach(ep => {
+    const curl = buildApiCurl(ep, baseUrl, deviceId, equipmentId, token);
+    const bodyJson = typeof ep.body === 'function' ? JSON.stringify(ep.body(deviceId, equipmentId), null, 2) : null;
+
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.style.marginTop = '0.75rem';
+
+    const summaryP = document.createElement('p');
+    const methodBadge = document.createElement('span');
+    methodBadge.className = 'badge';
+    methodBadge.textContent = ep.method;
+    const pathCode = document.createElement('code');
+    pathCode.textContent = ' ' + ep.path + ' ';
+    const tagSpan = document.createElement('span');
+    tagSpan.className = 'muted';
+    tagSpan.textContent = `(${ep.tag})`;
+    summaryP.append(methodBadge, pathCode, tagSpan);
+
+    const summaryText = document.createElement('p');
+    summaryText.className = 'muted';
+    summaryText.textContent = ep.summary;
+
+    const authText = document.createElement('p');
+    authText.className = 'muted';
+    authText.textContent = `Auth: ${ep.auth}`;
+
+    card.append(summaryP, summaryText, authText);
+
+    if (bodyJson) {
+      const header = document.createElement('div');
+      header.className = 'cert-block-header';
+      const h2 = document.createElement('h2');
+      h2.textContent = 'Request body';
+      header.append(h2);
+      const pre = document.createElement('pre');
+      pre.className = 'cert-block';
+      pre.textContent = bodyJson;
+      card.append(header, pre);
+    }
+
+    const curlHeader = document.createElement('div');
+    curlHeader.className = 'cert-block-header';
+    const curlH2 = document.createElement('h2');
+    curlH2.textContent = 'curl';
+    const copyBtn = document.createElement('button');
+    copyBtn.type = 'button';
+    copyBtn.className = 'btn';
+    copyBtn.textContent = 'Copy';
+    copyBtn.onclick = () => copyApiText(buildApiCurl(ep, baseUrl, deviceId, equipmentId, token), copyBtn);
+    curlHeader.append(curlH2, copyBtn);
+
+    const curlPre = document.createElement('pre');
+    curlPre.className = 'cert-block';
+    curlPre.textContent = curl;
+
+    card.append(curlHeader, curlPre);
+    list.append(card);
+  });
+}
+
+['apiBaseUrl', 'apiSampleDeviceId', 'apiSampleEquipmentId', 'apiSampleToken'].forEach(id => {
+  document.getElementById(id).addEventListener('input', renderApiEndpoints);
 });
 
 async function loadTaskEventPreset(options = {}) {

@@ -8,6 +8,8 @@ public sealed class DeviceCatalogSnapshot
     public string MineName { get; set; } = string.Empty;
     public string TimeZone { get; set; } = string.Empty;
     public CatalogEquipment? Equipment { get; set; }
+    /// <summary>OU equipment list (Primary/Secondary + assigned operations) for Loader picker.</summary>
+    public List<CatalogEquipment> EquipmentList { get; set; } = [];
     public List<CatalogTaskType> TaskTypes { get; set; } = [];
     public List<CatalogWorkplace> Workplaces { get; set; } = [];
     public List<CatalogMaterial> Materials { get; set; } = [];
@@ -22,8 +24,11 @@ public sealed class CatalogTaskType
 {
     public string Id { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
+    public string Operation { get; set; } = string.Empty;
     public List<string> WorkplaceTypes { get; set; } = [];
     public List<string> PrimaryEquipmentTypes { get; set; } = [];
+    /// <summary>Equipment type ids allowed as secondary for this task type (from config/taskTypes).</summary>
+    public List<string> SecondaryEquipmentTypes { get; set; } = [];
     public string DestinationAllowed { get; set; } = string.Empty;
     public string MeasurementUnits { get; set; } = string.Empty;
     public string MultiplierUnit { get; set; } = string.Empty;
@@ -56,6 +61,9 @@ public sealed class CatalogEquipment
     public string Name { get; set; } = string.Empty;
     public string TypeId { get; set; } = string.Empty;
     public string TypeName { get; set; } = string.Empty;
+    /// <summary>Primary | Secondary from config/equipment (operationRole).</summary>
+    public string OperationRole { get; set; } = string.Empty;
+    public List<string> AssignedOperations { get; set; } = [];
 }
 
 public sealed class CatalogShiftInfo
@@ -93,6 +101,9 @@ public sealed class CatalogTaskCard
     public string Status { get; set; } = "Assigned";
     public bool IsAdHoc { get; set; }
     public string PrimaryEquipmentName { get; set; } = string.Empty;
+    public string PrimaryEquipmentId { get; set; } = string.Empty;
+    public string SecondaryEquipmentNames { get; set; } = string.Empty;
+    public List<string> SecondaryEquipmentIds { get; set; } = [];
 }
 
 public sealed class AdHocTaskCreateRequest
@@ -106,4 +117,14 @@ public sealed class AdHocTaskCreateRequest
     public string ExpectedStartDate { get; set; } = string.Empty;
     public string EstimatedStartTime { get; set; } = string.Empty;
     public string EstimatedEndTime { get; set; } = string.Empty;
+    /// <summary>
+    /// Optional unix epoch milliseconds for EventEnvelope.EventTime / Timestamp.
+    /// When set, Ad-Hoc start date/time should match this instant in the UI time zone.
+    /// </summary>
+    public long? EventTimeMs { get; set; }
+    /// <summary>
+    /// When set (secondary hauling Ad-Hoc), selected Loader / primary equipment id.
+    /// Published as PlannedEquipmentId; envelope equipment stays the current (secondary) device.
+    /// </summary>
+    public string? LoaderEquipmentId { get; set; }
 }

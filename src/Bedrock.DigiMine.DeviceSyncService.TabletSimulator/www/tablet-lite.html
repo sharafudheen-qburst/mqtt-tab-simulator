@@ -28,6 +28,14 @@
           </div>
           <span class="tl-badge-ready">Ready to Operate</span>
           <span class="tl-ou-chip" id="tlOuChip" title="">OU —</span>
+          <label class="tl-tz">
+            <span class="tl-tz-label">Time zone</span>
+            <select id="tlTimeZone" aria-label="Time zone">
+              <option value="Asia/Dubai" selected>Abu Dhabi</option>
+              <option value="Asia/Kolkata">IST</option>
+              <option value="UTC">UTC</option>
+            </select>
+          </label>
         </div>
         <div class="tl-top-actions">
           <span class="tl-chip-btn">Change TUM States</span>
@@ -87,41 +95,55 @@
             <label for="tlTaskType">Task Type</label>
             <select id="tlTaskType"></select>
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlLoaderField" hidden>
+            <label for="tlLoader">Loader</label>
+            <select id="tlLoader"></select>
+            <p class="tl-field-hint">Equipment matching the selected task type’s primary equipment types.</p>
+          </div>
+          <div class="tl-field" id="tlEventDateField">
+            <label for="tlEventDate">Event Date</label>
+            <input id="tlEventDate" type="date">
+          </div>
+          <div class="tl-field" id="tlEventTimeField">
+            <label for="tlEventTime">Event Time</label>
+            <input id="tlEventTime" type="time" step="60">
+            <p class="tl-field-hint" id="tlEventTimeHint">Converted to eventTime/timestamp; used as estimated start (selected time zone).</p>
+          </div>
+          <div class="tl-field" id="tlQuantityField">
             <label for="tlQuantity">Quantity</label>
             <input id="tlQuantity" type="number" min="0" step="any" placeholder="Enter Quantity">
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlWorkplaceField">
             <label for="tlWorkplace">Workplace</label>
             <select id="tlWorkplace"></select>
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlExpectedStartDateField">
             <label for="tlExpectedStartDate">Expected Start Date</label>
             <input id="tlExpectedStartDate" type="date">
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlPlannedEquipmentField">
             <label for="tlPlannedEquipment">Planned Equipment</label>
             <input id="tlPlannedEquipment" type="text" disabled>
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlStartTimeField">
             <label for="tlStartTime">Estimated Start Time</label>
             <input id="tlStartTime" type="time" step="60">
-            <p class="tl-field-hint">Mine local time (e.g. Abu Dhabi) — must be inside current shift.</p>
+            <p class="tl-field-hint" id="tlStartTimeHint">Times use the selected time zone (Abu Dhabi).</p>
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlMaterialField">
             <label for="tlMaterial">Material</label>
             <select id="tlMaterial"></select>
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlEndTimeField">
             <label for="tlEndTime">Estimated End Time</label>
             <input id="tlEndTime" type="time" step="60">
-            <p class="tl-field-hint">Mine local time (e.g. Abu Dhabi) — must be inside current shift.</p>
+            <p class="tl-field-hint" id="tlEndTimeHint">Times use the selected time zone (Abu Dhabi).</p>
           </div>
           <div class="tl-field" id="tlDestinationField" hidden>
             <label for="tlDestination">Allowed Destination</label>
             <select id="tlDestination"></select>
           </div>
-          <div class="tl-field">
+          <div class="tl-field" id="tlDeadlineField">
             <label for="tlDeadline">Deadline (Optional)</label>
             <div class="tl-field-deadline">
               <input id="tlDeadline" type="number" min="0" max="23.99" step="0.25" placeholder="Enter Deadline">
