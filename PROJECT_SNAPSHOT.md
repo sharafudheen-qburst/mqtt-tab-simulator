@@ -557,6 +557,7 @@ Shared DLLs from lib/ (DSS Domain + ProtoDecoder). See PROJECT_SNAPSHOT.md.
 
 | Date & time (UTC) | Change |
 |-------------------|--------|
+| 2026-09-17 | Added root `run-tablet-simulator.bat` for running the source checkout on Windows with `dotnet run -- --skip-lib-sync`; added `publish-tablet-simulator.bat` for self-contained deployment. |
 | 2026-08-27 13:50 UTC | Publish output now copies `NodeBridge/node_modules` when present; README documents `npm install` for published instance folders missing deps. |
 | 2026-08-24 09:55 UTC | Ad-Hoc: Event Date/Time UI → envelope `eventTime`/`timestamp`; start date/time derived from it; secondary omits `estimatedEndTime`. |
 | 2026-08-24 07:55 UTC | Fixed tablet/catalog timezone normalization (`GMT+04:00 Asia/Dubai` → `Asia/Dubai`) so current shift selection and displayed shift hours follow the selected time zone correctly. |

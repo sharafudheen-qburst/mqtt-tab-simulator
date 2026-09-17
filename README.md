@@ -40,6 +40,8 @@ dotnet run --project src/Bedrock.DigiMine.DeviceSyncService.TabletSimulator
 
 Web UI: http://localhost:5055 (port from `simulator-config.json`).
 
+On Windows, `run-tablet-simulator.bat` runs the source project with `dotnet run`, installs the Node bridge dependencies when Node.js is available, and skips the optional DSS library rebuild. Copy the `lib` DLLs from a prepared checkout before using it on another machine.
+
 ## Refresh shared DLLs
 
 After DeviceSyncService Domain or ProtoDecoder changes:
